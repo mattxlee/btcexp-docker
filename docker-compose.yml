@@ -4,10 +4,12 @@
 #                    \___________ same-origin /api proxy ____/
 #
 # Images are pulled from GitHub Container Registry (ghcr.io/mattxlee/*); no
-# local build is performed. btcidx needs a bitcoind reachable over JSON-RPC
-# (and optionally ZMQ).
+# local build is performed. Only btcexpfr publishes a port (the web UI); btcexp
+# and btcidx stay on the internal network. btcidx needs a bitcoind reachable
+# over JSON-RPC (and optionally ZMQ).
 #
-# Copy .env.example to .env and adjust storage paths, ports and credentials:
+# Copy .env.example to .env and adjust storage paths, the web port and the
+# bitcoind connection:
 #
 #   cp .env.example .env
 #   docker compose pull
@@ -17,8 +19,7 @@ name: btcexp
 
 services:
   # ---------------------------------------------------------------------------
-  # btcidx — Bitcoin address indexer + Electrum server.
-  # REST/HTTP :8080, Electrum TCP :50001, Prometheus :9090
+  # btcidx — Bitcoin address indexer + Electrum server (internal only).
   # ---------------------------------------------------------------------------
   btcidx:
     image: ${BTCIDX_IMAGE:-ghcr.io/mattxlee/btcidx}:${IMAGE_TAG:-latest}
@@ -34,48 +35,34 @@ services:
       BTCIDX_HTTP_STATIC_DIR: /var/lib/btcidx/swapper-ui/dist
       BTCIDX_ELECTRUM_ENABLED: "true"
       BTCIDX_ELECTRUM_TCP_BIND: 0.0.0.0:50001
-      BTCIDX_METRICS_ENABLED: ${BTCIDX_METRICS_ENABLED:-true}
-      BTCIDX_METRICS_BIND: 0.0.0.0:9090
-      # Share the compose Redis for the tx/header cache (optional, recommended).
+      # Share the compose Redis for the tx/header cache.
       BTCIDX_CACHE_REDIS_URL: redis://redis:6379
-      RUST_LOG: ${RUST_LOG:-info}
+      RUST_LOG: info
     extra_hosts:
       # Lets the container reach bitcoind/ZMQ running on the Docker host.
       - "host.docker.internal:host-gateway"
     volumes:
       - ${HOST_BTCIDX_DATA_DIR:-./data/btcidx}:/var/lib/btcidx/data
-    ports:
-      - "${PUB_BTCIDX_HTTP_PORT:-8080}:8080"
-      - "${PUB_BTCIDX_ELECTRUM_PORT:-50001}:50001"
-      - "${PUB_BTCIDX_METRICS_PORT:-9090}:9090"
     depends_on:
       - redis
     networks:
       - btcexp-net
 
   # ---------------------------------------------------------------------------
-  # btcexp — business API layer (REST + WebSocket) on top of btcidx.
+  # btcexp — business API layer (REST + WebSocket) on top of btcidx (internal).
   # ---------------------------------------------------------------------------
   btcexp:
     image: ${BTCEXP_IMAGE:-ghcr.io/mattxlee/btcexp}:${IMAGE_TAG:-latest}
     pull_policy: always
     restart: unless-stopped
     environment:
-      BIND_ADDR: 0.0.0.0:3000
       NETWORK: ${NETWORK:-signet}
       INDEXER_BACKEND: btcidx
       # In-network service names (not localhost).
       BTCIDX_REST_URL: http://btcidx:8080
       BTCIDX_ELECTRUM_ADDR_PORT: btcidx:50001
       REDIS_URL: redis://redis:6379
-      RATE_LIMIT_PER_MIN: ${RATE_LIMIT_PER_MIN:-60}
-      API_KEY: ${API_KEY:-}
-      ENABLE_TX_BROADCAST: ${ENABLE_TX_BROADCAST:-false}
-      TIP_POLL_SECS: ${TIP_POLL_SECS:-5}
-      MAX_LAG_BLOCKS: ${MAX_LAG_BLOCKS:-6}
-      RUST_LOG: ${RUST_LOG:-info}
-    ports:
-      - "${PUB_API_PORT:-3000}:3000"
+      RUST_LOG: info
     depends_on:
       - btcidx
       - redis
@@ -90,6 +77,7 @@ services:
 
   # ---------------------------------------------------------------------------
   # btcexpfr — frontend (nginx). Serves the SPA and proxies /api to btcexp.
+  # This is the only service reachable from outside Docker.
   # The public origin used for SEO canonical/sitemap is baked into the image.
   # ---------------------------------------------------------------------------
   btcexpfr:
@@ -98,7 +86,7 @@ services:
     restart: unless-stopped
     environment:
       API_PROXY: http://btcexp:3000
-      PRICE_PROXY: ${PRICE_PROXY:-https://price.intgrow.com}
+      PRICE_PROXY: https://price.intgrow.com
     volumes:
       # Overridden template: same as btcexpfr/nginx.conf but with Docker's
       # embedded DNS resolver so the `btcexp` service name resolves.
@@ -111,7 +99,7 @@ services:
       - btcexp-net
 
   # ---------------------------------------------------------------------------
-  # Redis — shared cache for btcexp and btcidx.
+  # Redis — shared cache for btcexp and btcidx (internal only).
   # ---------------------------------------------------------------------------
   redis:
     image: redis:7-alpine
