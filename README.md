@@ -1,10 +1,10 @@
 # intgrow 一体化部署（btcidx + btcexp + btcexpfr）
 
-使用 Docker Compose 在同一自定义网络 `btcexp-net` 中启动 intgrow 的三个组件，镜像从 GitHub Container Registry（`ghcr.io/mattxlee/*`）拉取，无需本地源码或构建。**对外只暴露前端 Web 端口**，其余服务仅在内部网络互相访问。
+使用 Docker Compose 在同一自定义网络 `btcexp-net` 中启动 intgrow 的三个组件，镜像从 GitHub Container Registry（`ghcr.io/mattxlee/*`）拉取，无需本地源码或构建。**仅前端 Web 网关发布到宿主机回环地址**，其余服务仅在内部网络互相访问。若需要从宿主机外访问，请由 TLS 反向代理转发该回环端口。
 
 | 服务 | 组件 | 作用 | 对外暴露 |
 |---|---|---|---|
-| `btcexpfr` | [`../btcexpfr`](../btcexpfr) | 前端 Web UI（nginx），托管 SPA 并同源反代 API | ✅ 容器 80 → 宿主机 `PUB_WEB_PORT` |
+| `btcexpfr` | [`../btcexpfr`](../btcexpfr) | 前端 Web UI（nginx），托管 SPA 并同源反代 API | ✅ 容器 80 → 宿主机 `127.0.0.1:PUB_WEB_PORT` |
 | `btcexp` | [`../btcexp`](../btcexp) | 业务 API 层（REST + WebSocket） | ❌ 仅内部 `:3000` |
 | `btcidx` | [`../btcidx`](../btcidx) | Bitcoin 地址索引器 / Electrum 服务器 / REST | ❌ 仅内部 `:8080`、`:50001` |
 | `redis` | `redis:7-alpine` | 共享缓存 | ❌ 仅内部 `:6379` |
@@ -39,13 +39,13 @@ btcexp-docker/
 2. 一个可用的 **bitcoind**，并开启 JSON-RPC：
    - 各链默认 RPC 端口：mainnet `8332`、signet `38332`、testnet `18332`、regtest `18443`。
    - 建议启用 `txindex=1`。
-3. 推荐为 bitcoind 开启 ZMQ（否则 btcidx 回退轮询，仍可用）：
+3. 推荐为 bitcoind 开启 ZMQ（否则 btcidx 回退轮询，仍可用）。ZMQ 没有认证；不要绑定到 `0.0.0.0` 或公网接口。请绑定到 Docker 网桥或其他仅供容器访问的私有接口（地址因宿主机、rootless Docker/Podman 和自定义网络而异）：
    ```conf
-   zmqpubhashblock=tcp://0.0.0.0:28332
-   zmqpubhashtx=tcp://0.0.0.0:28332
-   zmqpubrawtx=tcp://0.0.0.0:28332
+   zmqpubhashblock=tcp://<docker-bridge-ip>:28332
+   zmqpubhashtx=tcp://<docker-bridge-ip>:28332
+   zmqpubrawtx=tcp://<docker-bridge-ip>:28332
    ```
-4. bitcoind 可被容器通过 `host.docker.internal` 访问（compose 已加 `host-gateway` 映射）。
+4. bitcoind 可被容器通过 `host.docker.internal` 访问（compose 已加 `host-gateway` 映射）。RPC 也应通过 `rpcbind` / `rpcallowip` 仅允许 Docker 网段，而不应暴露到公网。
 
 ---
 
@@ -80,7 +80,7 @@ docker compose logs -f btcidx
 - Web UI：<http://localhost:8088>（由 `PUB_WEB_PORT` 决定）
 - Swagger UI（经前端同源反代）：<http://localhost:8088/swagger-ui/>
 
-btcexp、btcidx、redis 均不对外暴露端口，只能通过上述 Web 网关或容器内部访问。
+btcexp、btcidx、redis 均不对外发布端口，只能通过上述 Web 网关或容器内部访问。Web 网关本身仅监听宿主机 `127.0.0.1`；从其他机器访问时，请配置 TLS 反向代理。
 
 ---
 
@@ -120,7 +120,7 @@ docker compose pull
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `NETWORK` | `signet` | 链网络，`mainnet`/`signet`/`testnet`/`regtest`，同时下发给 btcidx 与 btcexp，必须与 bitcoind 一致 |
-| `PUB_WEB_PORT` | `8088` | 唯一对外端口：前端 Web UI（容器端口固定为 80） |
+| `PUB_WEB_PORT` | `8088` | 唯一宿主机发布端口：前端 Web UI（仅绑定 `127.0.0.1`，容器端口固定为 80） |
 
 ### bitcoind 连接
 
@@ -141,7 +141,7 @@ docker compose pull
 - btcidx：容器内存储路径 `/var/lib/btcidx/data`、HTTP `:8080`、Electrum TCP `:50001`、Redis 缓存地址、日志级别。
 - btcexp：绑定 `0.0.0.0:3000`、索引后端 `btcidx`、上游 `btcidx:8080` / `btcidx:50001`、Redis 地址、限流/日志等使用内置默认值。
 - btcexpfr：`API_PROXY=http://btcexp:3000`、`PRICE_PROXY=https://price.intgrow.com`。
-- 除 `PUB_WEB_PORT` 外不发布任何端口；btcidx 的 Prometheus 指标默认关闭。
+- 除 `PUB_WEB_PORT` 外不发布任何端口；该 Web 端口仅绑定宿主机 `127.0.0.1`。若需从宿主机外访问，请由 TLS 反向代理转发；btcidx 的 Prometheus 指标默认关闭。
 
 如需调整这些值，请直接修改 `docker-compose.yml`。
 
