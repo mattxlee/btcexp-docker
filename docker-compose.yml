@@ -91,8 +91,10 @@ services:
       # Overridden template: same as btcexpfr/nginx.conf but with Docker's
       # embedded DNS resolver so the `btcexp` service name resolves.
       - ./nginx.conf:/etc/nginx/templates/default.conf.template:ro
+    # Keep the gateway local by default; publish it through a TLS reverse proxy
+    # when it must be reachable beyond this host.
     ports:
-      - "${PUB_WEB_PORT:-8088}:80"
+      - "127.0.0.1:${PUB_WEB_PORT:-8088}:80"
     depends_on:
       - btcexp
     networks:
