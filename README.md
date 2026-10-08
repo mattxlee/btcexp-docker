@@ -39,12 +39,38 @@ btcexp-docker/
 2. 一个可用的 **bitcoind**，并开启 JSON-RPC：
    - 常见 RPC 端口：mainnet `8332`、signet `38332`、传统 testnet3 `18332`、testnet4 `48332`、regtest `18443`；始终以节点实际配置为准。
    - 建议启用 `txindex=1`。
-3. 推荐为 bitcoind 开启 ZMQ（否则 btcidx 回退轮询，仍可用）。ZMQ 没有认证；不要绑定到 `0.0.0.0` 或公网接口。请绑定到 Docker 网桥或其他仅供容器访问的私有接口（地址因宿主机、rootless Docker/Podman 和自定义网络而异）：
+3. 推荐为 bitcoind 开启 ZMQ（否则 btcidx 回退轮询，仍可用）。ZMQ 没有认证；不要绑定到 `0.0.0.0` 或公网接口。请绑定到 Docker 网桥或其他仅供容器访问的私有接口（地址因宿主机、rootless Docker/Podman 和自定义网络而异）。
+
+   在对应 bitcoind 实例的 `bitcoin.conf` 中设置三类通知，例如主网：
    ```conf
+   # 将 <docker-bridge-ip> 替换为该宿主机供容器访问的私有地址。
    zmqpubhashblock=tcp://<docker-bridge-ip>:28332
    zmqpubhashtx=tcp://<docker-bridge-ip>:28332
    zmqpubrawtx=tcp://<docker-bridge-ip>:28332
    ```
+   三个通知可以、也应当使用**同一个**地址和端口：它们是同一个 ZMQ 发布端点上的不同主题，不需要为每种通知单独开端口。
+
+   若通过命令行启动 bitcoind，配置项名称前必须加 `-`：
+   ```bash
+   bitcoind \
+     -zmqpubhashblock=tcp://<docker-bridge-ip>:28332 \
+     -zmqpubhashtx=tcp://<docker-bridge-ip>:28332 \
+     -zmqpubrawtx=tcp://<docker-bridge-ip>:28332
+   ```
+   修改 `bitcoin.conf` 后重启对应 bitcoind 实例；使用命令行参数时，重启命令时带上这些参数。随后在该部署的环境文件中使用相同端点：
+   ```env
+   BTCIDX_ZMQ_ENABLED=true
+   BTCIDX_ZMQ_ENDPOINT=tcp://host.docker.internal:28332
+   ```
+
+   同机运行 mainnet 和 testnet4 时，两个 **bitcoind 实例之间**必须使用不同的 ZMQ 端口；例如 testnet4 可使用 `28333`。同一个 testnet4 实例的三类通知仍可共用该端口：
+   ```conf
+   # testnet4 的 bitcoin.conf
+   zmqpubhashblock=tcp://<docker-bridge-ip>:28333
+   zmqpubhashtx=tcp://<docker-bridge-ip>:28333
+   zmqpubrawtx=tcp://<docker-bridge-ip>:28333
+   ```
+   对应的命令行形式为 `-zmqpubhashblock=tcp://<docker-bridge-ip>:28333`、`-zmqpubhashtx=tcp://<docker-bridge-ip>:28333` 和 `-zmqpubrawtx=tcp://<docker-bridge-ip>:28333`。并将 testnet4 环境文件中的 `BTCIDX_ZMQ_ENDPOINT` 设为 `tcp://host.docker.internal:28333`。确认实际监听地址和端口后再启动 Compose。
 4. bitcoind 可被容器通过 `host.docker.internal` 访问（compose 已加 `host-gateway` 映射）。RPC 也应通过 `rpcbind` / `rpcallowip` 仅允许 Docker 网段，而不应暴露到公网。
 
 ---
