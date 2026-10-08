@@ -12,10 +12,12 @@
 # bitcoind connection:
 #
 #   cp .env.example .env
-#   docker compose pull
-#   docker compose up -d
+#   docker compose --env-file /etc/btcexp/<instance>.env -p btcexp-<instance> pull
+#   docker compose --env-file /etc/btcexp/<instance>.env -p btcexp-<instance> up -d
 
-name: btcexp
+# Set COMPOSE_PROJECT_NAME per deployment (for example btcexp-mainnet).
+# Compose scopes container and network names by this value.
+name: ${COMPOSE_PROJECT_NAME:-btcexp}
 
 services:
   # ---------------------------------------------------------------------------
@@ -25,8 +27,10 @@ services:
     image: ${BTCIDX_IMAGE:-ghcr.io/mattxlee/btcidx}:${IMAGE_TAG:-latest}
     pull_policy: always
     restart: unless-stopped
+    # Must match the file selected with --env-file so btcidx receives its
+    # instance-specific RPC/ZMQ configuration too.
     env_file:
-      - .env
+      - ${BTCIDX_ENV_FILE:-.env}
     environment:
       BTCIDX_NETWORK: ${NETWORK:-signet}
       # Container path; the host path is bind-mounted below (HOST_BTCIDX_DATA_DIR).
