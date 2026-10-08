@@ -37,7 +37,7 @@ btcexp-docker/
 
 1. Docker Engine 与 Compose v2（`docker compose version`）。
 2. 一个可用的 **bitcoind**，并开启 JSON-RPC：
-   - 各链默认 RPC 端口：mainnet `8332`、signet `38332`、testnet `18332`、regtest `18443`。
+   - 常见 RPC 端口：mainnet `8332`、signet `38332`、传统 testnet3 `18332`、testnet4 `48332`、regtest `18443`；始终以节点实际配置为准。
    - 建议启用 `txindex=1`。
 3. 推荐为 bitcoind 开启 ZMQ（否则 btcidx 回退轮询，仍可用）。ZMQ 没有认证；不要绑定到 `0.0.0.0` 或公网接口。请绑定到 Docker 网桥或其他仅供容器访问的私有接口（地址因宿主机、rootless Docker/Podman 和自定义网络而异）：
    ```conf
@@ -54,23 +54,25 @@ btcexp-docker/
 ```bash
 cd btcexp-docker
 
-# 1. 生成配置并按需修改（存储路径、Web 端口、bitcoind 连接、NETWORK）
-cp .env.example .env
-$EDITOR .env
+# 1. 将模板复制到 checkout 外的私有路径并按需修改。
+sudo install -d -m 700 /etc/btcexp
+sudo install -m 600 .env.example /etc/btcexp/signet.env
+sudoedit /etc/btcexp/signet.env
+# 将 BTCIDX_ENV_FILE 改为 /etc/btcexp/signet.env，并设置唯一的
+# COMPOSE_PROJECT_NAME、数据目录、Web 端口和 bitcoind RPC/ZMQ 配置。
 
-# 2. 准备宿主机数据目录并授予容器用户权限（首次必须执行）
-mkdir -p "$(sed -n 's/^HOST_BTCIDX_DATA_DIR=//p' .env)" \
-         "$(sed -n 's/^HOST_REDIS_DATA_DIR=//p' .env)"
-sudo chown -R 10000:10000 data/btcidx    # btcidx 镜像以 UID 10000 运行
-sudo chown -R 999:999   data/redis       # redis:7-alpine 以 UID 999 运行
+# 2. 准备该实例的数据目录并授予容器用户权限（首次必须执行）。
+sudo mkdir -p /srv/btcexp/signet/{btcidx,redis}
+sudo chown -R 10000:10000 /srv/btcexp/signet/btcidx
+sudo chown -R 999:999 /srv/btcexp/signet/redis
 
-# 3. 拉取镜像并启动
-docker compose pull
-docker compose up -d
+# 3. 显式指定配置文件和项目名，拉取镜像并启动。
+docker compose --env-file /etc/btcexp/signet.env -p btcexp-signet pull
+docker compose --env-file /etc/btcexp/signet.env -p btcexp-signet up -d
 
-# 4. 查看状态
-docker compose ps
-docker compose logs -f btcidx
+# 4. 查看该实例的状态。
+docker compose --env-file /etc/btcexp/signet.env -p btcexp-signet ps
+docker compose --env-file /etc/btcexp/signet.env -p btcexp-signet logs -f btcidx
 ```
 
 首次启动 btcidx 会从 genesis 同步整条链，追平（`utxo_ready=true`）后查询才返回数据；同步期间接口返回 `503`。同步耗时取决于链与磁盘。
@@ -88,7 +90,7 @@ btcexp、btcidx、redis 均不对外发布端口，只能通过上述 Web 网关
 
 仅保留部署相关、必须由用户决定的设置；其余参数在 `docker-compose.yml` 中固定。
 
-Docker Compose 自身读取该文件做变量插值；同时整个文件也通过 `env_file` 注入 `btcidx` 容器，因此其中 `BTCIDX_*`（RPC/ZMQ）项即为 btcidx 的连接配置。
+Docker Compose 通过 `--env-file` 读取该文件做变量插值；`BTCIDX_ENV_FILE` 必须设置为同一个绝对路径，Compose 才会把该文件注入 `btcidx` 容器。因此其中的 `BTCIDX_*`（RPC/ZMQ）项即为该实例的 btcidx 连接配置。单实例兼容方式仍可复制 `.env.example` 为 `.env` 并保留默认 `BTCIDX_ENV_FILE=.env`。
 
 ### 存储路径
 
@@ -97,7 +99,7 @@ Docker Compose 自身读取该文件做变量插值；同时整个文件也通�
 | `HOST_BTCIDX_DATA_DIR` | `./data/btcidx` | btcidx RocksDB 数据目录（挂载到容器 `/var/lib/btcidx/data`） |
 | `HOST_REDIS_DATA_DIR` | `./data/redis` | Redis 持久化目录（挂载到容器 `/data`） |
 
-相对路径以本 compose 目录为基准。
+相对路径以本 compose 目录为基准。多实例部署必须使用不重叠的**绝对路径**；两个 btcidx 绝不能共享 RocksDB 目录，两个 Redis 实例也绝不能共享持久化目录。
 
 ### 容器镜像
 
@@ -112,27 +114,29 @@ Docker Compose 自身读取该文件做变量插值；同时整个文件也通�
 
 ```bash
 echo "$GHCR_TOKEN" | docker login ghcr.io -u <github-user> --password-stdin
-docker compose pull
+docker compose --env-file /etc/btcexp/mainnet.env -p btcexp-mainnet pull
 ```
 
 ### 网络与端口
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `NETWORK` | `signet` | 链网络，`mainnet`/`signet`/`testnet`/`regtest`，同时下发给 btcidx 与 btcexp，必须与 bitcoind 一致 |
-| `PUB_WEB_PORT` | `8088` | 唯一宿主机发布端口：前端 Web UI（仅绑定 `127.0.0.1`，容器端口固定为 80） |
+| `COMPOSE_PROJECT_NAME` | `btcexp` | Compose 项目名；每个实例必须唯一，用于隔离容器与网络 |
+| `BTCIDX_ENV_FILE` | `.env` | 注入 `btcidx` 的环境文件；必须等于启动时 `--env-file` 的同一文件（外部文件使用绝对路径） |
+| `NETWORK` | `signet` | 链网络，`mainnet`/`signet`/`testnet`/`regtest`，同时下发给 btcidx 与 btcexp，必须与 bitcoind 一致；Bitcoin Core testnet4 使用 `testnet` |
+| `PUB_WEB_PORT` | `8088` | 唯一宿主机发布端口：前端 Web UI（仅绑定 `127.0.0.1`，容器端口固定为 80）；每个实例必须不同 |
 
 ### bitcoind 连接
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `BTCIDX_RPC_URL` | `http://host.docker.internal:8332` | bitcoind JSON-RPC 地址；**注意按链改端口** |
+| `BTCIDX_RPC_URL` | `http://host.docker.internal:8332` | bitcoind JSON-RPC 地址；**注意按链改端口**。testnet4 常见默认值是 `48332`（以节点实际配置为准，不要沿用 testnet3 的 `18332`） |
 | `BTCIDX_RPC_USER` / `BTCIDX_RPC_PASS` | `bitcoin` / `change-me` | RPC 用户名密码 |
 | `BTCIDX_RPC_COOKIE_FILE` | 注释 | 改用 cookie 认证时：注释掉上面的 USER/PASS，再启用此项 |
 | `BTCIDX_ZMQ_ENABLED` | `true` | 是否使用 ZMQ 实时通知 |
 | `BTCIDX_ZMQ_ENDPOINT` | `tcp://host.docker.internal:28332` | bitcoind ZMQ 端点 |
 
-> 若使用 cookie 认证：`.env` 中注释掉 `BTCIDX_RPC_USER`/`BTCIDX_RPC_PASS`、启用 `BTCIDX_RPC_COOKIE_FILE` 后，需 `docker compose up -d` 重建容器，使变量不再注入。
+> 若使用 cookie 认证：所选实例环境文件中注释掉 `BTCIDX_RPC_USER`/`BTCIDX_RPC_PASS`、启用 `BTCIDX_RPC_COOKIE_FILE` 后，使用该实例对应的 `docker compose --env-file … -p … up -d` 重建容器，使变量不再注入。
 
 ### 固定的内部配置
 
@@ -147,26 +151,70 @@ docker compose pull
 
 ---
 
-## 常用命令
+## 同时部署 mainnet 与 testnet4
+
+使用同一份 checkout 时，为每个链创建一个 checkout 外的私有环境文件。仓库中的
+[`env/mainnet.env.example`](env/mainnet.env.example) 与
+[`env/testnet4.env.example`](env/testnet4.env.example) 是无凭据模板。
 
 ```bash
-docker compose pull                   # 拉取/更新 ghcr 镜像
-docker compose up -d                  # 启动全部服务
-docker compose up -d --force-recreate btcexp   # 用新镜像重建某个服务
-docker compose logs -f btcidx         # 跟踪日志
-docker compose ps                     # 查看状态
-docker compose restart btcexp         # 重启
-docker compose down                   # 停止并删除容器（保留 data/ 数据）
+cd btcexp-docker
+sudo install -d -m 700 /etc/btcexp
+sudo install -m 600 env/mainnet.env.example /etc/btcexp/mainnet.env
+sudo install -m 600 env/testnet4.env.example /etc/btcexp/testnet4.env
+sudoedit /etc/btcexp/mainnet.env
+sudoedit /etc/btcexp/testnet4.env
+
+# 目录不能共享；按模板创建后设置镜像运行用户的权限。
+sudo mkdir -p /srv/btcexp/mainnet/{btcidx,redis} \
+              /srv/btcexp/testnet4/{btcidx,redis}
+sudo chown -R 10000:10000 /srv/btcexp/mainnet/btcidx /srv/btcexp/testnet4/btcidx
+sudo chown -R 999:999 /srv/btcexp/mainnet/redis /srv/btcexp/testnet4/redis
+
+# 每条链使用不同项目名，因此拥有独立容器和 btcexp-net 网络。
+docker compose --env-file /etc/btcexp/mainnet.env -p btcexp-mainnet up -d
+docker compose --env-file /etc/btcexp/testnet4.env -p btcexp-testnet4 up -d
+```
+
+主网模板使用 `NETWORK=mainnet`、`127.0.0.1:8088` 和
+`/srv/btcexp/mainnet/*`；testnet4 模板使用 `NETWORK=testnet`、
+`127.0.0.1:8089` 和 `/srv/btcexp/testnet4/*`。`testnet4` 是 Bitcoin Core
+链实例的名称，而 btcexp/btcidx 的应用配置值是通用的 `testnet`。
+
+两个环境文件都必须设置其自身的 `COMPOSE_PROJECT_NAME` 与
+`BTCIDX_ENV_FILE`，后者需与 `--env-file` 指定的绝对路径相同。每个实例还
+必须指向自己的 bitcoind RPC/ZMQ 端点；不要共享 RPC/ZMQ 端口、认证信息或数据
+目录。ZMQ 仍须只绑定 Docker 网桥或其他私有接口。
+
+反向代理应使用不同上游，例如 `mainnet.example.com` → `127.0.0.1:8088`，
+`testnet4.example.com` → `127.0.0.1:8089`。两个端口都仍然只绑定到宿主机回环地址。
+
+---
+
+## 常用命令
+
+以下以 `/etc/btcexp/mainnet.env` 与 `btcexp-mainnet` 为例。对 testnet4 请将两者
+替换为 `/etc/btcexp/testnet4.env` 与 `btcexp-testnet4`；不要省略这两个实例标识。
+
+```bash
+COMPOSE=(docker compose --env-file /etc/btcexp/mainnet.env -p btcexp-mainnet)
+"${COMPOSE[@]}" pull                         # 拉取/更新 ghcr 镜像
+"${COMPOSE[@]}" up -d                         # 启动全部服务
+"${COMPOSE[@]}" up -d --force-recreate btcexp # 用新镜像重建某个服务
+"${COMPOSE[@]}" logs -f btcidx                # 跟踪日志
+"${COMPOSE[@]}" ps                            # 查看状态
+"${COMPOSE[@]}" restart btcexp                # 重启
+"${COMPOSE[@]}" down                          # 停止并删除容器（保留数据目录）
 
 # 健康检查（通过容器内网络访问，无需对外端口）
-docker compose exec btcexp curl -fsS http://127.0.0.1:3000/api/v1/ready      # btcexp（同步完成前 503）
-docker compose exec btcexp curl -fsS http://btcidx:8080/api/v1/status       # btcidx
-curl -fsS http://localhost:8088/                                           # 前端
+"${COMPOSE[@]}" exec btcexp curl -fsS http://127.0.0.1:3000/api/v1/ready # btcexp（同步完成前 503）
+"${COMPOSE[@]}" exec btcexp curl -fsS http://btcidx:8080/api/v1/status    # btcidx
+curl -fsS http://127.0.0.1:8088/                                            # 前端
 
-# 清空 btcidx 索引重新同步（危险）
-docker compose stop btcidx
-sudo rm -rf data/btcidx/* && sudo chown -R 10000:10000 data/btcidx
-docker compose up -d btcidx
+# 清空 mainnet btcidx 索引重新同步（危险；替换为本实例的实际目录）
+"${COMPOSE[@]}" stop btcidx
+sudo rm -rf /srv/btcexp/mainnet/btcidx/* && sudo chown -R 10000:10000 /srv/btcexp/mainnet/btcidx
+"${COMPOSE[@]}" up -d btcidx
 ```
 
 ---
