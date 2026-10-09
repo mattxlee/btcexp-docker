@@ -45,6 +45,13 @@ services:
     extra_hosts:
       # Lets the container reach bitcoind/ZMQ running on the Docker host.
       - "host.docker.internal:host-gateway"
+    # Docker's default soft limit is 1024, which a large RocksDB store can
+    # exhaust. 65536 gives ample headroom for the indexer; nothing raises the
+    # limit at runtime, so soft and hard are the same.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     volumes:
       - ${HOST_BTCIDX_DATA_DIR:-./data/btcidx}:/var/lib/btcidx/data
     depends_on:
