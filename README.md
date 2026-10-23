@@ -143,6 +143,12 @@ echo "$GHCR_TOKEN" | docker login ghcr.io -u <github-user> --password-stdin
 docker compose --env-file /etc/btcexp/mainnet.env -p btcexp-mainnet pull
 ```
 
+### SEO 站点域名
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `APP_URL` | 空 | 部署对外的站点根地址（无尾斜杠）。btcexpfr 启动时把它写入 `robots.txt` / `sitemap.xml`：mainnet 用 `https://www.intgrow.com`，testnet4 用 `https://testnet4.intgrow.com`。为空时省略绝对 URL。镜像本身不含域名，两个实例共用同一镜像。 |
+
 ### 网络与端口
 
 | 变量 | 默认 | 说明 |

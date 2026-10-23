@@ -89,7 +89,8 @@ services:
   # ---------------------------------------------------------------------------
   # btcexpfr — frontend (nginx). Serves the SPA and proxies /api to btcexp.
   # This is the only service reachable from outside Docker.
-  # The public origin used for SEO canonical/sitemap is baked into the image.
+  # APP_URL is the deployment's public origin; entrypoint.sh writes it into
+  # robots.txt/sitemap.xml at container start (the image itself has no domain).
   # ---------------------------------------------------------------------------
   btcexpfr:
     image: ${BTCEXPFR_IMAGE:-ghcr.io/mattxlee/btcexpfr}:${IMAGE_TAG:-latest}
@@ -98,6 +99,9 @@ services:
     environment:
       API_PROXY: http://btcexp:3000
       PRICE_PROXY: https://price.intgrow.com
+      # Public site origin, e.g. https://www.intgrow.com (mainnet) or
+      # https://testnet4.intgrow.com (testnet4). Set per instance env file.
+      APP_URL: ${APP_URL:-}
     volumes:
       # Overridden template: same as btcexpfr/nginx.conf but with Docker's
       # embedded DNS resolver so the `btcexp` service name resolves.
