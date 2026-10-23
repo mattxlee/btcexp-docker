@@ -102,6 +102,9 @@ services:
       # Public site origin, e.g. https://www.intgrow.com (mainnet) or
       # https://testnet4.intgrow.com (testnet4). Set per instance env file.
       APP_URL: ${APP_URL:-}
+      # GA4 measurement ID (G-XXXXXXX) injected into index.html at start.
+      # Empty = analytics disabled (e.g. testnet4 until it has a property).
+      GA_ID: ${GA_ID:-}
     volumes:
       # Overridden template: same as btcexpfr/nginx.conf but with Docker's
       # embedded DNS resolver so the `btcexp` service name resolves.

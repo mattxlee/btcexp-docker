@@ -148,6 +148,7 @@ docker compose --env-file /etc/btcexp/mainnet.env -p btcexp-mainnet pull
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `APP_URL` | 空 | 部署对外的站点根地址（无尾斜杠）。btcexpfr 启动时把它写入 `robots.txt` / `sitemap.xml`：mainnet 用 `https://www.intgrow.com`，testnet4 用 `https://testnet4.intgrow.com`。为空时省略绝对 URL。镜像本身不含域名，两个实例共用同一镜像。 |
+| `GA_ID` | 空 | GA4 measurement ID（如 `G-24M49RN8J6`），btcexpfr 启动时注入 `index.html`。为空则完全不加载统计脚本；testnet4 在建立自己的媒体资源前保持为空。 |
 
 ### 网络与端口
 
