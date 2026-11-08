@@ -1,15 +1,17 @@
-# Orchestrates the three Intgrow components on one Docker network:
+# Orchestrates the Intgrow components on one Docker network:
 #
-#   btcexpfr (nginx, web UI)  ->  btcexp (business API)  ->  btcidx (indexer)
-#                    \___________ same-origin /api proxy ____/
+#   btcexp (SSR web UI + realtime /ws)  ->  btcidx (indexer)
+#                   \_______________________ redis (shared cache)
 #
 # Images are pulled from GitHub Container Registry (ghcr.io/mattxlee/*); no
-# local build is performed. Only btcexpfr publishes a port (the web UI); btcexp
-# and btcidx stay on the internal network. btcidx needs a bitcoind reachable
-# over JSON-RPC (and optionally ZMQ).
+# local build is performed. Only btcexp publishes a port; btcidx and redis
+# stay on the internal network. btcidx needs a bitcoind reachable over
+# JSON-RPC (and optionally ZMQ).
 #
-# Copy .env.example to .env and adjust storage paths, the web port and the
-# bitcoind connection:
+# btcexpfr has been folded into btcexp and is no longer part of this stack.
+#
+# Copy .env.example to .env and adjust storage paths, the web port, site
+# origin and the bitcoind connection:
 #
 #   cp .env.example .env
 #   docker compose --env-file /etc/btcexp/<instance>.env -p btcexp-<instance> pull
@@ -60,7 +62,9 @@ services:
       - btcexp-net
 
   # ---------------------------------------------------------------------------
-  # btcexp — business API layer (REST + WebSocket) on top of btcidx (internal).
+  # btcexp — server-rendered web UI + first-party realtime socket, on top of
+  # btcidx. This is the only service reachable from outside Docker. The JSON
+  # API and Swagger stay off unless API_ENABLED=true.
   # ---------------------------------------------------------------------------
   btcexp:
     image: ${BTCEXP_IMAGE:-ghcr.io/mattxlee/btcexp}:${IMAGE_TAG:-latest}
@@ -74,6 +78,24 @@ services:
       BTCIDX_ELECTRUM_ADDR_PORT: btcidx:50001
       REDIS_URL: redis://redis:6379
       RUST_LOG: info
+      # JSON/WS API and Swagger are off by default; the SSR UI talks to the
+      # service layer directly. Enable only if a client needs the API.
+      API_ENABLED: ${API_ENABLED:-false}
+      API_KEY: ${API_KEY:-}
+      # Public origin used for canonical/Open Graph URLs and /sitemap.xml.
+      # Empty keeps relative canonicals and disables the sitemap.
+      APP_URL: ${APP_URL:-}
+      # GA4 measurement ID; empty disables analytics.
+      GA_ID: ${GA_ID:-}
+      # Network-switch links in the header; empty hides the link.
+      MAINNET_URL: ${MAINNET_URL:-}
+      TESTNET4_URL: ${TESTNET4_URL:-}
+      # Concurrent first-party /ws connections per client IP.
+      WS_MAX_CONNS_PER_IP: ${WS_MAX_CONNS_PER_IP:-5}
+    # Keep the HTTP port (UI + ops + /ws) on the host loopback by default;
+    # publish it through a TLS reverse proxy for access from elsewhere.
+    ports:
+      - "127.0.0.1:${PUB_WEB_PORT:-8088}:3000"
     depends_on:
       - btcidx
       - redis
@@ -83,35 +105,6 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
-    networks:
-      - btcexp-net
-
-  # ---------------------------------------------------------------------------
-  # btcexpfr — frontend (nginx). Serves the SPA and proxies /api to btcexp.
-  # This is the only service reachable from outside Docker.
-  # APP_URL is the deployment's public origin; entrypoint.sh writes it into
-  # robots.txt/sitemap.xml at container start (the image itself has no domain).
-  # ---------------------------------------------------------------------------
-  btcexpfr:
-    image: ${BTCEXPFR_IMAGE:-ghcr.io/mattxlee/btcexpfr}:${IMAGE_TAG:-latest}
-    pull_policy: always
-    restart: unless-stopped
-    environment:
-      API_PROXY: http://btcexp:3000
-      PRICE_PROXY: https://price.intgrow.com
-      # Public site origin, e.g. https://www.intgrow.com (mainnet) or
-      # https://testnet4.intgrow.com (testnet4). Set per instance env file.
-      APP_URL: ${APP_URL:-}
-    volumes:
-      # Overridden template: same as btcexpfr/nginx.conf but with Docker's
-      # embedded DNS resolver so the `btcexp` service name resolves.
-      - ./nginx.conf:/etc/nginx/templates/default.conf.template:ro
-    # Keep the gateway local by default; publish it through a TLS reverse proxy
-    # when it must be reachable beyond this host.
-    ports:
-      - "127.0.0.1:${PUB_WEB_PORT:-8088}:80"
-    depends_on:
-      - btcexp
     networks:
       - btcexp-net
 
