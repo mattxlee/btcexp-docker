@@ -1,0 +1,25 @@
+# rathole CLIENT — runs in the btcidx stack on the LAN host.
+# Copy to /etc/btcexp/btcidx-<instance>-rathole.toml (set RATHOLE_CONFIG_FILE)
+# and keep it private. The paired server config is rathole/server.toml.example.
+
+[client]
+# Public host and the RATHOLE_CONTROL_PORT published by its btcexp stack.
+# The port here is the host-side port, not the container-side 2333.
+remote_addr = "explorer.example.com:2333"
+# Must equal the server's default_token.
+default_token = "REPLACE_WITH_A_LONG_RANDOM_TOKEN"
+
+[client.transport]
+type = "noise"
+
+[client.transport.noise]
+# Public key printed next to the private key by `rathole --genkey`.
+remote_public_key = "REPLACE_WITH_PUBLIC_KEY_PRINTED_BY_RATHOLE_GENKEY"
+
+# Service names must match server.toml. These are the in-network names of the
+# btcidx container in docker-compose.btcidx.yml.
+[client.services.btcidx-http]
+local_addr = "btcidx:8080"
+
+[client.services.btcidx-electrum]
+local_addr = "btcidx:50001"

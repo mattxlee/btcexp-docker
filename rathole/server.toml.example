@@ -1,0 +1,30 @@
+# rathole SERVER — runs in the btcexp stack on the PUBLIC host.
+# Copy to /etc/btcexp/btcexp-<instance>-rathole.toml (set RATHOLE_CONFIG_FILE)
+# and keep it private. The paired client config is rathole/client.toml.example.
+#
+# Generate the Noise key pair once (on either host):
+#   docker run --rm rapiz1/rathole:v0.5.0 --genkey
+# Keep the private key here; put the public key in client.toml.
+# Generate a separate long random token for the tunnel, e.g.:
+#   openssl rand -hex 32
+
+[server]
+# Container-side listen address. docker-compose.btcexp.yml publishes host
+# port RATHOLE_CONTROL_PORT to this port.
+bind_addr = "0.0.0.0:2333"
+default_token = "REPLACE_WITH_A_LONG_RANDOM_TOKEN"
+
+[server.transport]
+type = "noise"
+
+[server.transport.noise]
+local_private_key = "REPLACE_WITH_PRIVATE_KEY_PRINTED_BY_RATHOLE_GENKEY"
+
+# Service names must match client.toml. These ports are consumed by btcexp as
+# rathole-server:5202 (REST) and rathole-server:5203 (Electrum); they are not
+# published to the host.
+[server.services.btcidx-http]
+bind_addr = "0.0.0.0:5202"
+
+[server.services.btcidx-electrum]
+bind_addr = "0.0.0.0:5203"
