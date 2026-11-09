@@ -87,6 +87,9 @@ services:
       APP_URL: ${APP_URL:-}
       # GA4 measurement ID; empty disables analytics.
       GA_ID: ${GA_ID:-}
+      # External BTC price quote endpoint; empty disables the price card.
+      PRICE_API_URL: ${PRICE_API_URL:-https://price.intgrow.com}
+      PRICE_INST_ID: ${PRICE_INST_ID:-BTC-USDT}
       # Network-switch links in the header; empty hides the link.
       MAINNET_URL: ${MAINNET_URL:-}
       TESTNET4_URL: ${TESTNET4_URL:-}

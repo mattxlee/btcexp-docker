@@ -157,6 +157,13 @@ docker compose --env-file /etc/btcexp/mainnet.env -p btcexp-mainnet pull
 | `MAINNET_URL` / `TESTNET4_URL` | 空 | 顶栏网络切换链接；为空隐藏对应链接。 |
 | `WS_MAX_CONNS_PER_IP` | 由镜像默认 `5` | 可选的每 IP 并发 `/ws` 连接上限；一般无需在编排中设置。 |
 
+### BTC 价格（可选）
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `PRICE_API_URL` | `https://price.intgrow.com` | btcexp 服务端请求的 BTC 报价端点；为空则首页价格卡片显示“—”。路径为 `/price?inst_id=...`。 |
+| `PRICE_INST_ID` | `BTC-USDT` | 请求的交易对。 |
+
 ### JSON API（可选）
 
 | 变量 | 默认 | 说明 |
