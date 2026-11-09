@@ -1,4 +1,8 @@
 .env
 data/
-# Real rathole configs contain the tunnel token/private key; keep only *.example.
+# Real rathole configs and TLS material contain the tunnel token and private
+# keys; keep only *.example and gen-certs.sh.
 rathole/*.toml
+rathole/*.pem
+rathole/*.p12
+rathole/*.key

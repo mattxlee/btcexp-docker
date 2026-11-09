@@ -90,8 +90,11 @@ services:
     restart: unless-stopped
     command: ["/etc/rathole/rathole.toml"]
     volumes:
-      # Contains the private key and service tokens; keep it private.
+      # Contains the server certificate password and service tokens; keep it
+      # private.
       - ${RATHOLE_CONFIG_FILE:-./rathole/server.toml}:/etc/rathole/rathole.toml:ro
+      # PKCS#12 bundle with the server certificate, key and CA chain (TLS).
+      - ${RATHOLE_P12_FILE:-./rathole/server.p12}:/etc/rathole/certs/server.p12:ro
     ports:
       # Host port must be unique per instance on this host; the container
       # side stays 2333 and must match rathole/server.toml's bind_addr.

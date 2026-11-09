@@ -1,6 +1,9 @@
 # rathole CLIENT — runs in the btcidx stack on the LAN host.
 # Copy to /etc/btcexp/btcidx-<instance>-rathole.toml (set RATHOLE_CONFIG_FILE)
 # and keep it private. The paired server config is rathole/server.toml.example.
+#
+# The tunnel uses TLS. Point the compose env var RATHOLE_CA_FILE at the CA
+# certificate that signed the server's certificate (see rathole/gen-certs.sh).
 
 [client]
 # Public host and the RATHOLE_CONTROL_PORT published by its btcexp stack.
@@ -10,11 +13,14 @@ remote_addr = "explorer.example.com:2333"
 default_token = "REPLACE_WITH_A_LONG_RANDOM_TOKEN"
 
 [client.transport]
-type = "noise"
+type = "tls"
 
-[client.transport.noise]
-# Public key printed next to the private key by `rathole --genkey`.
-remote_public_key = "REPLACE_WITH_PUBLIC_KEY_PRINTED_BY_RATHOLE_GENKEY"
+[client.transport.tls]
+# CA certificate (PEM) that signed the server certificate.
+# Mounted at this path by docker-compose.btcidx.yml (RATHOLE_CA_FILE).
+trusted_root = "/etc/rathole/certs/ca.pem"
+# Must match a subjectAltName in the server certificate.
+hostname = "explorer.example.com"
 
 # Service names must match server.toml. These are the in-network names of the
 # btcidx container in docker-compose.btcidx.yml.

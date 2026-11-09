@@ -23,7 +23,7 @@ btcexp 通过 [rathole](https://github.com/rapiz1/rathole) 隧道访问 btcidx �
 │                                    rathole-server                 │
 │                                     ▲ :2333 控制端口（发布到宿主机）│
 └─────────────────────────────────────┼─────────────────────────────┘
-                                      │ Noise 加密隧道（LAN 主动外连）
+                                      │ TLS 加密隧道（LAN 主动外连）
 ┌─ 局域网主机 docker-compose.btcidx.yml ┼───────────────────────────┐
 │                                rathole-client                     │
 │                                     │                             │
@@ -61,11 +61,13 @@ btcexp-docker/
 │   └── btcexp-testnet4.env.example
 ├── rathole/
 │   ├── client.toml.example         # 局域网侧隧道配置模板
-│   └── server.toml.example         # 外网侧隧道配置模板
+│   ├── server.toml.example         # 外网侧隧道配置模板
+│   └── gen-certs.sh                # 生成 CA 与服务端 TLS 证书
 └── README.md
 ```
 
-`.env`、`data/`、真实的 `rathole/*.toml` 均已加入 `.gitignore`，不要提交。
+`.env`、`data/`、真实的 `rathole/*.toml` 与生成的证书（`rathole/*.pem`、
+`rathole/*.p12`、`rathole/*.key`）均已加入 `.gitignore`，不要提交。
 
 ---
 
@@ -110,33 +112,42 @@ btcexp-docker/
 
 ## rathole 隧道准备
 
-rathole 的客户端与服务端使用同名服务条目、共享 token，并用 Noise 协议加密
-并认证隧道。两端配置中的服务名必须完全一致。
+rathole 的客户端与服务端使用同名服务条目、共享 token，并用 **TLS** 加密并
+认证隧道。服务端出示证书，客户端用 CA 证书校验，因此不再需要 Noise 密钥对。
+两端配置中的服务名必须完全一致。
 
-### 1. 生成密钥与 token（只需一次，可任选一台主机执行）
+### 1. 生成证书与 token（只需一次，可任选一台主机执行）
 
 ```bash
-# Noise 密钥对：服务端保存 Private Key，客户端配置 Public Key。
-docker run --rm rapiz1/rathole:v0.5.0 --genkey
+# 生成 CA、服务端证书（SAN = 外网主机名）和 PKCS#12 包。
+# 脚本会打印 p12 密码，填到服务端配置的 pkcs12_password。
+./rathole/gen-certs.sh explorer.example.com
+# -> rathole/ca.pem、rathole/server.pem、rathole/server.key、rathole/server.p12
 
 # 共享 token：两端 default_token 必须相同。
 openssl rand -hex 32
 ```
 
-> 不要使用任何示例或网上公开的密钥。
+> mainnet 和 testnet4 若使用不同的公网主机名，各生成一套证书即可；也可以用
+> 同一个 CA 签发多张服务端证书。证书生成后请把 `ca.key` 移出本机或妥善离线
+> 保管——只有它才能再签发新证书。`ca.pem` 是公开信息，需要部署到局域网主机。
 
 ### 2. 外网主机：rathole 服务端配置
 
 ```bash
 sudo install -d -m 700 /etc/btcexp
 sudo install -m 600 rathole/server.toml.example /etc/btcexp/btcexp-mainnet-rathole.toml
+sudo install -m 600 rathole/server.p12 /etc/btcexp/btcexp-mainnet.p12
 sudoedit /etc/btcexp/btcexp-mainnet-rathole.toml
 ```
 
 填写：
 
 - `[server].default_token`：上一步生成的 token。
-- `[server.transport.noise].local_private_key`：`--genkey` 输出的 Private Key。
+- `[server.transport.tls].pkcs12_password`：`gen-certs.sh` 打印的 p12 密码。
+- `[server.transport.tls].pkcs12`：保持 `/etc/rathole/certs/server.p12`；该路径
+  由 `RATHOLE_P12_FILE`（见 env 模板，默认 `/etc/btcexp/btcexp-mainnet.p12`）
+  挂载进来。
 - `[server.services.*].bind_addr`：保持 `5202`（REST）与 `5203`（Electrum）；
   btcexp 固定使用 `rathole-server:5202` / `:5203`。这些端口只在 Docker 网络内
   可达，不会发布到宿主机。
@@ -146,6 +157,7 @@ sudoedit /etc/btcexp/btcexp-mainnet-rathole.toml
 
 ```bash
 sudo install -m 600 rathole/client.toml.example /etc/btcexp/btcidx-mainnet-rathole.toml
+sudo install -m 644 rathole/ca.pem /etc/btcexp/ca.pem
 sudoedit /etc/btcexp/btcidx-mainnet-rathole.toml
 ```
 
@@ -154,12 +166,93 @@ sudoedit /etc/btcexp/btcidx-mainnet-rathole.toml
 - `[client].remote_addr`：外网主机的域名或 IP + 其发布的控制端口
   （如 `explorer.example.com:2333`）。
 - `[client].default_token`：与服务端相同。
-- `[client.transport.noise].remote_public_key`：`--genkey` 输出的 Public Key。
+- `[client.transport.tls].trusted_root`：保持 `/etc/rathole/certs/ca.pem`；该
+  路径由 `RATHOLE_CA_FILE`（默认 `/etc/btcexp/ca.pem`）挂载进来。
+- `[client.transport.tls].hostname`：必须与服务端证书的 SAN 一致（通常就是
+  `remote_addr` 里的域名；不一致会导致证书校验失败）。
 - `[client.services.*].local_addr`：保持 `btcidx:8080` / `btcidx:50001`（容器内
   服务名，不是 `127.0.0.1`）。
 
-> 多实例（mainnet/testnet4）使用各自的 token 与密钥对，并分别指定不同的
-> rathole 配置文件。两套隧道互不影响。
+> 多实例（mainnet/testnet4）使用各自的 token、证书与控制端口，并分别指定
+> 不同的 rathole 配置文件。两套隧道互不影响。
+
+### 4. 从 Noise 切换到 TLS（已有部署的迁移步骤）
+
+传输层切换是**不兼容变更**：旧客户端连不上新服务端，反之亦然。两端必须一起
+改，切换窗口内隧道中断，btcexp 会暂时没有上游。建议按下面的顺序操作，每个
+实例（mainnet / testnet4）单独做一遍。
+
+1. **备份两端配置**
+
+   ```bash
+   # 外网主机
+   sudo cp /etc/btcexp/btcexp-<instance>-rathole.toml{,.bak}
+   # 局域网主机
+   sudo cp /etc/btcexp/btcidx-<instance>-rathole.toml{,.bak}
+   ```
+
+2. **生成证书**（任一台主机执行，只需一次）
+
+   ```bash
+   ./rathole/gen-certs.sh <客户端 dial 的公网域名>
+   ```
+
+   域名必须与客户端 `remote_addr` 中的主机名一致（如
+   `explorer.example.com`），脚本已把它写入证书 SAN。记下打印的 p12 密码。
+   mainnet 与 testnet4 若域名不同，各生成一套；也可以复用同一个 CA 签发多张
+   服务端证书。`ca.key` 生成后应移出服务器、离线保存。
+
+3. **外网主机：先切服务端**
+
+   ```bash
+   cd btcexp-docker
+   sudo install -m 600 rathole/server.p12 /etc/btcexp/btcexp-<instance>.p12
+   # 用新模板更新服务端配置：transport 改为 tls，填 token 与 pkcs12_password
+   sudoedit /etc/btcexp/btcexp-<instance>-rathole.toml
+   sudoedit /etc/btcexp/btcexp-<instance>.env   # 增加：
+   #   RATHOLE_P12_FILE=/etc/btcexp/btcexp-<instance>.p12
+   docker compose -f docker-compose.btcexp.yml \
+     --env-file /etc/btcexp/btcexp-<instance>.env -p btcexp-<instance> \
+     up -d rathole-server
+   ```
+
+4. **局域网主机：再切客户端**
+
+   ```bash
+   cd btcexp-docker
+   sudo install -m 644 rathole/ca.pem /etc/btcexp/ca.pem
+   # 用新模板更新客户端配置：transport 改为 tls，填 token、trusted_root 与
+   # hostname（与服务端证书 SAN 一致）
+   sudoedit /etc/btcexp/btcidx-<instance>-rathole.toml
+   sudoedit /etc/btcexp/btcidx-<instance>.env   # 增加：
+   #   RATHOLE_CA_FILE=/etc/btcexp/ca.pem
+   docker compose -f docker-compose.btcidx.yml \
+     --env-file /etc/btcexp/btcidx-<instance>.env -p btcidx-<instance> \
+     up -d rathole-client
+   ```
+
+5. **验证**
+
+   ```bash
+   # 局域网主机：每个服务各出现一次 Control channel established
+   docker compose -f docker-compose.btcidx.yml \
+     --env-file /etc/btcexp/btcidx-<instance>.env -p btcidx-<instance> \
+     logs rathole-client | grep 'Control channel established'
+
+   # 外网主机：隧道已通，能读到 btcidx 状态即成功
+   docker compose -f docker-compose.btcexp.yml \
+     --env-file /etc/btcexp/btcexp-<instance>.env -p btcexp-<instance> \
+     exec btcexp curl -fsS http://rathole-server:5202/api/v1/status
+   ```
+
+6. **回滚**（TLS 切换失败时）
+
+   把两端的 `*.toml.bak` 恢复回原路径，删除 env 中新增的 `RATHOLE_P12_FILE` /
+   `RATHOLE_CA_FILE` 行（Compose 挂载有默认值，不设也能启动），再对两个编排
+   分别 `up -d rathole-server` / `up -d rathole-client` 即可退回 Noise。
+
+其余部署信息（token、服务名、`5202`/`5203`、控制端口与防火墙规则）完全不变，
+切换只影响传输层。改动后首次重建容器即可，无需删除数据目录或 Redis。
 
 ---
 
@@ -286,7 +379,8 @@ RPC/ZMQ 配置；`BTCIDX_ENV_FILE` 必须等于 `--env-file` 的绝对路径。
 | `IMAGE_TAG` | `latest` | intgrow 镜像标签（可固定为具体版本） |
 | `BTCIDX_IMAGE` | `ghcr.io/mattxlee/btcidx` | btcidx 镜像（一般无需修改） |
 | `NETWORK` | `signet` | `mainnet`/`signet`/`testnet`/`regtest`；Bitcoin Core testnet4 用 `testnet` |
-| `RATHOLE_CONFIG_FILE` | `./rathole/client.toml` | rathole 客户端配置（含 token 与公钥） |
+| `RATHOLE_CONFIG_FILE` | `./rathole/client.toml` | rathole 客户端配置（含 token） |
+| `RATHOLE_CA_FILE` | `./rathole/ca.pem` | TLS 校验用 CA 证书（签发服务端证书的那张） |
 | `RATHOLE_IMAGE` / `RATHOLE_VERSION` | `rapiz1/rathole` / `v0.5.0` | 隧道镜像 |
 | `BTCIDX_RPC_URL` | `http://host.docker.internal:8332` | bitcoind JSON-RPC 地址（按链改端口） |
 | `BTCIDX_RPC_USER` / `BTCIDX_RPC_PASS` | `bitcoin` / `change-me` | RPC 凭据 |
@@ -308,7 +402,8 @@ RPC/ZMQ 配置；`BTCIDX_ENV_FILE` 必须等于 `--env-file` 的绝对路径。
 | `NETWORK` | `signet` | 必须与局域网侧 `NETWORK` 一致 |
 | `PUB_WEB_PORT` | `8088` | btcexp 的 Web UI / `/ws` / ops 端口（宿主机侧） |
 | `PUB_WEB_BIND` | `127.0.0.1` | 宿主机侧绑定地址；`0.0.0.0` 或具体 IP 表示直接对外提供 HTTP，默认仅回环供反向代理使用 |
-| `RATHOLE_CONFIG_FILE` | `./rathole/server.toml` | rathole 服务端配置（含私钥与 token） |
+| `RATHOLE_CONFIG_FILE` | `./rathole/server.toml` | rathole 服务端配置（含证书密码与 token） |
+| `RATHOLE_P12_FILE` | `./rathole/server.p12` | TLS 服务端证书的 PKCS#12 包 |
 | `RATHOLE_CONTROL_PORT` | `2333` | 发布到宿主机的隧道控制端口；每个实例唯一，且客户端 `remote_addr` 必须指向它 |
 | `APP_URL` | 空 | 对外站点根地址（无尾斜杠），用于 canonical/OG、`robots.txt`、`sitemap.xml`；为空则保持相对路径并禁用 sitemap |
 | `GA_ID` | 空 | GA4 measurement ID；为空不加载统计脚本 |
@@ -350,7 +445,7 @@ RPC/ZMQ 配置；`BTCIDX_ENV_FILE` 必须等于 `--env-file` 的绝对路径。
 要点：
 
 - 每个实例使用**独立的**数据目录、Redis 目录、项目名与 rathole 配置
-  （各自的 token 与密钥对）。两个 btcidx 绝不能共享 RocksDB 目录，两个 Redis
+  （各自的 token 与证书）。两个 btcidx 绝不能共享 RocksDB 目录，两个 Redis
   也绝不能共享持久化目录。
 - testnet4 的 `NETWORK=testnet`（Bitcoin Core 的链实例叫 testnet4，应用配置值
   是通用的 `testnet`）。
@@ -403,8 +498,9 @@ rathole-client`。常见原因：
 - 客户端 `remote_addr` 指向的域名/端口错误，或外网防火墙未放行
   `RATHOLE_CONTROL_PORT`；
 - 两端 `default_token` 不一致（日志会提示认证失败）；
-- Noise 密钥不匹配：服务端 `local_private_key` 与客户端 `remote_public_key`
-  必须来自同一次 `rathole --genkey`；
+- TLS 证书校验失败：客户端的 `trusted_root` 必须是签发服务端证书的 CA，
+  `hostname` 必须出现在服务端证书的 SAN 中；服务端 `pkcs12_password` 错误或
+  `RATHOLE_P12_FILE` 指向的不是那张证书时同样会握手失败；
 - 两端服务名不一致（见 rathole `.toml` 中的 `[*.services.btcidx-http]` 与
   `[*.services.btcidx-electrum]`）。
 
@@ -466,7 +562,7 @@ btcexp 编排中适当提高 `ELECTRUM_CONNECT_TIMEOUT_SECS` /
 3. 在局域网主机沿用原 btcidx 数据目录（`chown 10000:10000` 保持不变）；旧的
    Redis 目录只属于旧共享缓存，可保留或清空。外网主机需要新建一个空的 Redis
    目录（`chown 999:999`）。
-4. 生成 rathole 密钥/token 并按上文配置两端，然后先启动 btcidx 编排，再启动
+4. 生成 rathole 证书/token 并按上文配置两端，然后先启动 btcidx 编排，再启动
    btcexp 编排。
 
 ---
@@ -477,5 +573,5 @@ btcexp 编排中适当提高 `ELECTRUM_CONNECT_TIMEOUT_SECS` /
   部署。
 - `btcexpfr` 已废弃：旧部署中的该服务、`nginx.conf` 和 `BTCEXPFR_IMAGE` 变量
   可删除。
-- 真实的 `rathole/*.toml` 含隧道 token 与私钥，`.env` 含凭据，`data/` 含运行
+- 真实的 `rathole/*.toml` 含隧道 token，生成的证书文件含私钥，`.env` 含凭据，`data/` 含运行
   数据，均不应提交到版本库。

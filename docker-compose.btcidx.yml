@@ -73,6 +73,8 @@ services:
     volumes:
       # Contains the server address and the shared token; keep it private.
       - ${RATHOLE_CONFIG_FILE:-./rathole/client.toml}:/etc/rathole/rathole.toml:ro
+      # CA certificate that signed the server's certificate (TLS transport).
+      - ${RATHOLE_CA_FILE:-./rathole/ca.pem}:/etc/rathole/certs/ca.pem:ro
     depends_on:
       - btcidx
     networks:
