@@ -62,10 +62,12 @@ services:
       TESTNET4_URL: ${TESTNET4_URL:-}
       # Concurrent first-party /ws connections per client IP.
       WS_MAX_CONNS_PER_IP: ${WS_MAX_CONNS_PER_IP:-5}
-    # Keep the HTTP port (UI + ops + /ws) on the host loopback by default;
-    # publish it through a TLS reverse proxy for access from elsewhere.
+    # Host-side bind address for the HTTP port (UI + ops + /ws). The default
+    # keeps it on loopback for a TLS reverse proxy; set PUB_WEB_BIND=0.0.0.0
+    # (or a specific host IP) to serve HTTP directly. The container port stays
+    # 3000; btcexp listens on 0.0.0.0:3000 unless BIND_ADDR overrides it.
     ports:
-      - "127.0.0.1:${PUB_WEB_PORT:-8088}:3000"
+      - "${PUB_WEB_BIND:-127.0.0.1}:${PUB_WEB_PORT:-8088}:3000"
     depends_on:
       - rathole-server
       - redis

@@ -236,11 +236,36 @@ docker compose -f docker-compose.btcexp.yml \
 
 ### 访问地址
 
-- Web UI：<http://localhost:8088/>（由 `PUB_WEB_PORT` 决定，仅监听
-  `127.0.0.1`；对外请配置 TLS 反向代理）
+- Web UI：<http://localhost:8088/>（由 `PUB_WEB_PORT` 决定）。默认只绑定
+  `127.0.0.1`，供本机 TLS 反向代理转发；若要让 btcexp 直接提供 HTTP，将
+  `PUB_WEB_BIND` 设为 `0.0.0.0`（或某个具体网卡地址），见下方“对外提供
+  HTTP 的方式”
 - 健康检查：`/health`、`/ready`（含 indexer lag）、`/metrics`（Prometheus）
 - 实时提示：页面自动连接 `ws://localhost:8088/ws?topics=blocks,mempool`
 - JSON API（仅 `API_ENABLED=true`）：`/api/v1/*`、`/swagger-ui/`
+
+### 对外提供 HTTP 的方式
+
+btcexp 容器内固定监听 `0.0.0.0:3000`（如需改动可在编排中加入
+`BIND_ADDR`，同时相应修改 `ports` 的容器端口）。能否从外部访问只取决于
+`ports` 的宿主机地址与端口：
+
+1. **TLS 反向代理（推荐）**：保持默认 `PUB_WEB_BIND=127.0.0.1`，由同机的
+   nginx/Caddy 转发到 `http://127.0.0.1:8088`。反向代理必须转发
+   `Upgrade`/`Connection` 头，否则 `/ws` 实时提示不可用。
+2. **btcexp 直接提供 HTTP**：在外网主机的环境文件中设置
+   ```env
+   PUB_WEB_BIND=0.0.0.0     # 或某个具体网卡 IP
+   PUB_WEB_PORT=8088
+   ```
+   重建容器后在防火墙放行该端口，访问 `http://<主机>:8088/`。注意此方式没有
+   TLS；若使用 Cloudflare 等 CDN 终止 TLS，请关闭其缓存对 `/ws` 的干扰，并让
+   源站只接受 CDN 回源地址。
+3. **路由器/NAT 端口映射**：主机位于 NAT 后时，同样需要
+   `PUB_WEB_BIND=0.0.0.0`，再把外网端口转发到该主机的 `PUB_WEB_PORT`。
+
+多个实例在同一台外网主机上时，`PUB_WEB_BIND` 可以相同，但 `PUB_WEB_PORT`
+必须不同（如 mainnet `8088`、testnet4 `8089`）。
 
 ---
 
@@ -281,7 +306,8 @@ RPC/ZMQ 配置；`BTCIDX_ENV_FILE` 必须等于 `--env-file` 的绝对路径。
 | `IMAGE_TAG` | `latest` | intgrow 镜像标签 |
 | `BTCEXP_IMAGE` | `ghcr.io/mattxlee/btcexp` | btcexp 镜像（一般无需修改） |
 | `NETWORK` | `signet` | 必须与局域网侧 `NETWORK` 一致 |
-| `PUB_WEB_PORT` | `8088` | btcexp 的 Web UI / `/ws` / ops 端口（仅绑定 `127.0.0.1`） |
+| `PUB_WEB_PORT` | `8088` | btcexp 的 Web UI / `/ws` / ops 端口（宿主机侧） |
+| `PUB_WEB_BIND` | `127.0.0.1` | 宿主机侧绑定地址；`0.0.0.0` 或具体 IP 表示直接对外提供 HTTP，默认仅回环供反向代理使用 |
 | `RATHOLE_CONFIG_FILE` | `./rathole/server.toml` | rathole 服务端配置（含私钥与 token） |
 | `RATHOLE_CONTROL_PORT` | `2333` | 发布到宿主机的隧道控制端口；每个实例唯一，且客户端 `remote_addr` 必须指向它 |
 | `APP_URL` | 空 | 对外站点根地址（无尾斜杠），用于 canonical/OG、`robots.txt`、`sitemap.xml`；为空则保持相对路径并禁用 sitemap |
@@ -303,8 +329,8 @@ RPC/ZMQ 配置；`BTCIDX_ENV_FILE` 必须等于 `--env-file` 的绝对路径。
   `redis://redis:6379`。
 - rathole 服务端：控制端口容器内固定 `2333`，服务端口固定 `5202`/`5203`；
   只有控制端口发布到宿主机。
-- 局域网编排不发布任何端口；外网编排只发布 `PUB_WEB_PORT`（绑定 `127.0.0.1`）
-  与 `RATHOLE_CONTROL_PORT`。
+- 局域网编排不发布任何端口；外网编排只发布 `PUB_WEB_BIND:PUB_WEB_PORT`
+  （默认 `127.0.0.1`）与 `RATHOLE_CONTROL_PORT`。
 
 如需调整这些值，请直接修改对应的 `docker-compose.*.yml` 与 rathole 配置。
 
