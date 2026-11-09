@@ -306,6 +306,16 @@ btcidx 尚在同步或正处于 reorg。用 `docker compose exec btcexp curl -fs
 **RPC 认证失败 / 连接被拒**
 确认 `BTCIDX_RPC_URL` 的端口与 `NETWORK` 匹配（signet 为 38332），且 bitcoind 的 `rpcbind`/`rpcallowip` 允许 Docker 网段访问。
 
+**Redis 启动日志提示 `Memory overcommit must be enabled`**
+这是宿主机内核参数 `vm.overcommit_memory=0` 导致的告警，Redis 容器无法修改它：该参数不属于内核命名空间，Docker 也不允许通过 `--sysctl` 设置。在宿主机执行并持久化：
+
+```bash
+echo 'vm.overcommit_memory = 1' | sudo tee /etc/sysctl.d/99-redis-overcommit.conf
+sudo sysctl --system
+```
+
+本编排里的 Redis 只作为 btcexp/btcidx 的共享缓存；出现该告警时，最坏情况是后台 RDB 保存失败、缓存丢失（可自动重建），不影响 btcidx 的索引数据。仍建议按上面启用，避免 fork 保存失败。
+
 ---
 
 ## 备注
