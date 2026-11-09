@@ -1,1 +1,4 @@
 .env
+data/
+# Real rathole configs contain the tunnel token/private key; keep only *.example.
+rathole/*.toml

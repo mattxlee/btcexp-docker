@@ -1,0 +1,100 @@
+# LAN side of the split Intgrow deployment.
+#
+#   btcidx ──► redis (btcidx's own cache)
+#      │
+#      └── rathole-client ──(outbound only)──► rathole-server on the public host
+#
+# This stack runs on the private/LAN host next to bitcoind. It publishes no
+# host ports: the rathole client only makes an outbound connection to the
+# public host. btcidx's REST (:8080) and Electrum (:50001) endpoints are
+# forwarded through rathole and consumed by btcexp on the public host.
+#
+# The public side lives in docker-compose.btcexp.yml; see README.md.
+#
+#   docker compose -f docker-compose.btcidx.yml \
+#     --env-file /etc/btcexp/btcidx-mainnet.env -p btcidx-mainnet pull
+#   docker compose -f docker-compose.btcidx.yml \
+#     --env-file /etc/btcexp/btcidx-mainnet.env -p btcidx-mainnet up -d
+
+# Set COMPOSE_PROJECT_NAME per deployment (for example btcidx-mainnet).
+# Compose scopes container and network names by this value.
+name: ${COMPOSE_PROJECT_NAME:-btcidx}
+
+services:
+  # ---------------------------------------------------------------------------
+  # btcidx — Bitcoin address indexer + Electrum server (internal only).
+  # ---------------------------------------------------------------------------
+  btcidx:
+    image: ${BTCIDX_IMAGE:-ghcr.io/mattxlee/btcidx}:${IMAGE_TAG:-latest}
+    pull_policy: always
+    restart: unless-stopped
+    # Must match the file selected with --env-file so btcidx receives its
+    # instance-specific RPC/ZMQ configuration too.
+    env_file:
+      - ${BTCIDX_ENV_FILE:-.env}
+    environment:
+      BTCIDX_NETWORK: ${NETWORK:-signet}
+      # Container path; the host path is bind-mounted below (HOST_BTCIDX_DATA_DIR).
+      BTCIDX_STORE_PATH: /var/lib/btcidx/data
+      BTCIDX_HTTP_BIND: 0.0.0.0:8080
+      BTCIDX_HTTP_STATIC_DIR: /var/lib/btcidx/swapper-ui/dist
+      BTCIDX_ELECTRUM_ENABLED: "true"
+      BTCIDX_ELECTRUM_TCP_BIND: 0.0.0.0:50001
+      # This stack's own Redis instance (the public host has a separate one).
+      BTCIDX_CACHE_REDIS_URL: redis://redis:6379
+      RUST_LOG: info
+    extra_hosts:
+      # Lets the container reach bitcoind/ZMQ running on the Docker host.
+      - "host.docker.internal:host-gateway"
+    # Docker's default soft limit is 1024, which a large RocksDB store can
+    # exhaust. 65536 gives ample headroom for the indexer; nothing raises the
+    # limit at runtime, so soft and hard are the same.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - ${HOST_BTCIDX_DATA_DIR:-./data/btcidx}:/var/lib/btcidx/data
+    depends_on:
+      - redis
+    networks:
+      - intgrow-net
+
+  # ---------------------------------------------------------------------------
+  # rathole-client — dials out to the public host and exposes btcidx's REST
+  # and Electrum ports through the tunnel. The service names in the mounted
+  # config must match rathole/server.toml on the public host; see
+  # rathole/client.toml.example.
+  # ---------------------------------------------------------------------------
+  rathole-client:
+    image: ${RATHOLE_IMAGE:-rapiz1/rathole}:${RATHOLE_VERSION:-v0.5.0}
+    restart: unless-stopped
+    command: ["/etc/rathole/rathole.toml"]
+    volumes:
+      # Contains the server address and the shared token; keep it private.
+      - ${RATHOLE_CONFIG_FILE:-./rathole/client.toml}:/etc/rathole/rathole.toml:ro
+    depends_on:
+      - btcidx
+    networks:
+      - intgrow-net
+
+  # ---------------------------------------------------------------------------
+  # Redis — btcidx's cache (internal only). The btcexp stack has its own.
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    volumes:
+      - ${HOST_REDIS_DATA_DIR:-./data/redis}:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks:
+      - intgrow-net
+
+networks:
+  intgrow-net:
+    driver: bridge

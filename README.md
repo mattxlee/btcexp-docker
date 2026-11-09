@@ -1,26 +1,50 @@
-# intgrow 一体化部署（btcidx + btcexp）
+# intgrow 拆分部署（btcidx 局域网 + btcexp 外网 + rathole）
 
-使用 Docker Compose 在同一自定义网络 `btcexp-net` 中启动 intgrow 的组件，镜像从 GitHub Container Registry（`ghcr.io/mattxlee/*`）拉取，无需本地源码或构建。**仅 btcexp 发布到宿主机回环地址**，btcidx 与 Redis 仅在内部网络互相访问。若需要从宿主机外访问，请由 TLS 反向代理转发该回环端口。
+本仓库提供**两套相互独立的 Docker Compose 编排**，分别运行在两台主机上：
 
-> 原 `btcexpfr` 前端已并入 btcexp（SSR 页面 + 第一方 `/ws`），不再参与本编排；
-> 其仓库已标记为废弃。历史部署中的 `btcexpfr` 容器与 nginx 配置可以删除。
-
-| 服务 | 组件 | 作用 | 对外暴露 |
+| 编排文件 | 运行位置 | 服务 | 对外端口 |
 |---|---|---|---|
-| `btcexp` | [`../btcexp`](../btcexp) | 服务端渲染 Web UI、`/ws` 实时提示、ops 接口；可选 JSON API | ✅ 容器 3000 → 宿主机 `127.0.0.1:PUB_WEB_PORT` |
-| `btcidx` | [`../btcidx`](../btcidx) | Bitcoin 地址索引器 / Electrum 服务器 / REST | ❌ 仅内部 `:8080`、`:50001` |
-| `redis` | `redis:7-alpine` | 共享缓存 | ❌ 仅内部 `:6379` |
+| [`docker-compose.btcidx.yml`](docker-compose.btcidx.yml) | 局域网主机（与 bitcoind 同机） | `btcidx`、`redis`、`rathole-client` | **不发布任何端口**，仅主动外连公网主机 |
+| [`docker-compose.btcexp.yml`](docker-compose.btcexp.yml) | 外网（公网）主机 | `btcexp`、`redis`、`rathole-server` | `127.0.0.1:PUB_WEB_PORT`（Web UI/`/ws`）与 `RATHOLE_CONTROL_PORT`（隧道控制端口） |
 
-调用链路：
+btcexp 通过 [rathole](https://github.com/rapiz1/rathole) 隧道访问 btcidx 的 REST
+（`:8080`）与 Electrum TCP（`:50001`）。隧道由局域网侧的 `rathole-client`
+**主动外连**公网侧的 `rathole-server`，因此局域网不需要任何公网入站端口。
 
 ```
-浏览器 ──► btcexp:3000 ──(REST + Electrum TCP)──► btcidx:8080/50001 ──► bitcoind (宿主机)
-              │                                        │
-              └──────────────► redis:6379 ◄───────────┘
+浏览器
+   │  https（反向代理）
+   ▼
+┌─ 外网主机 docker-compose.btcexp.yml ──────────────────────────────┐
+│  btcexp:3000 ──────────────► redis:6379   （btcexp 自己的缓存）   │
+│      │                                                            │
+│      ├── REST     http://rathole-server:5202 ─┐                   │
+│      └── Electrum rathole-server:5203 ────────┤                   │
+│                                    rathole-server                 │
+│                                     ▲ :2333 控制端口（发布到宿主机）│
+└─────────────────────────────────────┼─────────────────────────────┘
+                                      │ Noise 加密隧道（LAN 主动外连）
+┌─ 局域网主机 docker-compose.btcidx.yml ┼───────────────────────────┐
+│                                rathole-client                     │
+│                                     │                             │
+│                     ┌───────────────┴───────────────┐             │
+│                     ▼                               ▼             │
+│  btcidx:8080（REST）/ :50001（Electrum） ──► redis:6379（btcidx 缓存）│
+│      │                                                            │
+│      └──► bitcoind（宿主机，JSON-RPC + ZMQ）                      │
+└───────────────────────────────────────────────────────────────────┘
 ```
 
-btcexp 直接渲染页面并订阅 btcidx，不再有独立的 nginx 前端，也不再需要同源 API 反代。
-`/api/v1/*` 与 Swagger 默认关闭（`API_ENABLED=false`）；Web UI 不依赖它们。
+> **为什么 Redis 两边各放一个？**
+> btcidx 与 btcexp 都各自使用 Redis 作为缓存：btcidx 缓存 tx/header/merkle
+> 证明，btcexp 缓存自己的响应。原来的单机编排让两者共享一个 Redis；拆分后
+> 跨公网共享缓存只会增加延迟和故障域，因此每套编排各带一个本地 Redis。
+> 两者都可以不配置 Redis：btcidx 会降级为“无缓存”，btcexp 回退到进程内内存
+> 缓存。当前编排默认两边都启用。
+
+> **历史说明**
+> 原 `btcexpfr` 前端已并入 btcexp；旧的单文件 `docker-compose.yml` 已拆分为
+> 上面的两套编排，迁移方法见文末。
 
 ---
 
@@ -28,22 +52,34 @@ btcexp 直接渲染页面并订阅 btcidx，不再有独立的 nginx 前端，�
 
 ```
 btcexp-docker/
-├── docker-compose.yml        # 编排定义
-├── .env.example              # 配置模板（复制为 .env）
-├── .env                      # 实际生效的配置（含凭据，勿提交）
-├── env/                      # mainnet / testnet4 多实例模板
+├── docker-compose.btcidx.yml       # 局域网主机：btcidx + redis + rathole-client
+├── docker-compose.btcexp.yml       # 外网主机：btcexp + redis + rathole-server
+├── env/
+│   ├── btcidx-mainnet.env.example  # 局域网主机配置模板
+│   ├── btcidx-testnet4.env.example
+│   ├── btcexp-mainnet.env.example  # 外网主机配置模板
+│   └── btcexp-testnet4.env.example
+├── rathole/
+│   ├── client.toml.example         # 局域网侧隧道配置模板
+│   └── server.toml.example         # 外网侧隧道配置模板
 └── README.md
 ```
+
+`.env`、`data/`、真实的 `rathole/*.toml` 均已加入 `.gitignore`，不要提交。
 
 ---
 
 ## 前置条件
 
-1. Docker Engine 与 Compose v2（`docker compose version`）。
-2. 一个可用的 **bitcoind**，并开启 JSON-RPC：
-   - 常见 RPC 端口：mainnet `8332`、signet `38332`、传统 testnet3 `18332`、testnet4 `48332`、regtest `18443`；始终以节点实际配置为准。
+1. 两台主机均安装 Docker Engine 与 Compose v2（`docker compose version`）。
+2. 局域网主机上有一个可用的 **bitcoind**：
+   - 常见 RPC 端口：mainnet `8332`、signet `38332`、传统 testnet3 `18332`、
+     testnet4 `48332`、regtest `18443`；始终以节点实际配置为准。
    - 建议启用 `txindex=1`。
-3. 推荐为 bitcoind 开启 ZMQ（否则 btcidx 回退轮询，仍可用）。ZMQ 没有认证；不要绑定到 `0.0.0.0` 或公网接口。请绑定到 Docker 网桥或其他仅供容器访问的私有接口（地址因宿主机、rootless Docker/Podman 和自定义网络而异）。
+   - RPC 只允许 Docker 网段访问（`rpcbind` / `rpcallowip`），不要暴露到公网。
+3. 推荐为 bitcoind 开启 ZMQ（否则 btcidx 回退轮询，仍可用）。ZMQ 没有认证，
+   不要绑定到 `0.0.0.0` 或公网接口；请绑定到 Docker 网桥或其他仅供容器访问的
+   私有接口。
 
    在对应 bitcoind 实例的 `bitcoin.conf` 中设置三类通知，例如主网：
    ```conf
@@ -52,213 +88,279 @@ btcexp-docker/
    zmqpubhashtx=tcp://<docker-bridge-ip>:28332
    zmqpubrawtx=tcp://<docker-bridge-ip>:28332
    ```
-   三个通知可以、也应当使用**同一个**地址和端口：它们是同一个 ZMQ 发布端点上的不同主题，不需要为每种通知单独开端口。
+   三个通知可以、也应当使用**同一个**地址和端口：它们是同一个 ZMQ 发布端点上
+   的不同主题，不需要为每种通知单独开端口。
 
-   若通过命令行启动 bitcoind，配置项名称前必须加 `-`：
+   命令行启动 bitcoind 时，配置项名称前必须加 `-`：
    ```bash
    bitcoind \
      -zmqpubhashblock=tcp://<docker-bridge-ip>:28332 \
      -zmqpubhashtx=tcp://<docker-bridge-ip>:28332 \
      -zmqpubrawtx=tcp://<docker-bridge-ip>:28332
    ```
-   修改 `bitcoin.conf` 后重启对应 bitcoind 实例；使用命令行参数时，重启命令时带上这些参数。随后在该部署的环境文件中使用相同端点：
-   ```env
-   BTCIDX_ZMQ_ENABLED=true
-   BTCIDX_ZMQ_ENDPOINT=tcp://host.docker.internal:28332
-   ```
-
-   同机运行 mainnet 和 testnet4 时，两个 **bitcoind 实例之间**必须使用不同的 ZMQ 端口；例如 testnet4 可使用 `28333`。同一个 testnet4 实例的三类通知仍可共用该端口：
-   ```conf
-   # testnet4 的 bitcoin.conf
-   zmqpubhashblock=tcp://<docker-bridge-ip>:28333
-   zmqpubhashtx=tcp://<docker-bridge-ip>:28333
-   zmqpubrawtx=tcp://<docker-bridge-ip>:28333
-   ```
-   对应的命令行形式为 `-zmqpubhashblock=tcp://<docker-bridge-ip>:28333`、`-zmqpubhashtx=tcp://<docker-bridge-ip>:28333` 和 `-zmqpubrawtx=tcp://<docker-bridge-ip>:28333`。并将 testnet4 环境文件中的 `BTCIDX_ZMQ_ENDPOINT` 设为 `tcp://host.docker.internal:28333`。确认实际监听地址和端口后再启动 Compose。
-4. bitcoind 可被容器通过 `host.docker.internal` 访问（compose 已加 `host-gateway` 映射）。RPC 也应通过 `rpcbind` / `rpcallowip` 仅允许 Docker 网段，而不应暴露到公网。
+   同机运行 mainnet 和 testnet4 时，两个 **bitcoind 实例之间**必须使用不同的
+   ZMQ 端口（例如 testnet4 用 `28333`）；同一实例的三类通知仍可共用端口。
+4. bitcoind 可被容器通过 `host.docker.internal` 访问（btcidx 编排已加
+   `host-gateway` 映射）。
+5. 外网主机的防火墙允许局域网主机访问 `RATHOLE_CONTROL_PORT`（默认 `2333`）。
+   这是外网主机**唯一**新增的入站端口，应尽量只放行局域网主机的公网出口地址。
+   外网主机还需能访问外部 BTC 报价服务（`PRICE_API_URL`）。
 
 ---
 
-## 快速开始
+## rathole 隧道准备
+
+rathole 的客户端与服务端使用同名服务条目、共享 token，并用 Noise 协议加密
+并认证隧道。两端配置中的服务名必须完全一致。
+
+### 1. 生成密钥与 token（只需一次，可任选一台主机执行）
+
+```bash
+# Noise 密钥对：服务端保存 Private Key，客户端配置 Public Key。
+docker run --rm rapiz1/rathole:v0.5.0 --genkey
+
+# 共享 token：两端 default_token 必须相同。
+openssl rand -hex 32
+```
+
+> 不要使用任何示例或网上公开的密钥。
+
+### 2. 外网主机：rathole 服务端配置
+
+```bash
+sudo install -d -m 700 /etc/btcexp
+sudo install -m 600 rathole/server.toml.example /etc/btcexp/btcexp-mainnet-rathole.toml
+sudoedit /etc/btcexp/btcexp-mainnet-rathole.toml
+```
+
+填写：
+
+- `[server].default_token`：上一步生成的 token。
+- `[server.transport.noise].local_private_key`：`--genkey` 输出的 Private Key。
+- `[server.services.*].bind_addr`：保持 `5202`（REST）与 `5203`（Electrum）；
+  btcexp 固定使用 `rathole-server:5202` / `:5203`。这些端口只在 Docker 网络内
+  可达，不会发布到宿主机。
+- `[server].bind_addr` 保持 `0.0.0.0:2333`，与 Compose 中容器端口一致。
+
+### 3. 局域网主机：rathole 客户端配置
+
+```bash
+sudo install -m 600 rathole/client.toml.example /etc/btcexp/btcidx-mainnet-rathole.toml
+sudoedit /etc/btcexp/btcidx-mainnet-rathole.toml
+```
+
+填写：
+
+- `[client].remote_addr`：外网主机的域名或 IP + 其发布的控制端口
+  （如 `explorer.example.com:2333`）。
+- `[client].default_token`：与服务端相同。
+- `[client.transport.noise].remote_public_key`：`--genkey` 输出的 Public Key。
+- `[client.services.*].local_addr`：保持 `btcidx:8080` / `btcidx:50001`（容器内
+  服务名，不是 `127.0.0.1`）。
+
+> 多实例（mainnet/testnet4）使用各自的 token 与密钥对，并分别指定不同的
+> rathole 配置文件。两套隧道互不影响。
+
+---
+
+## 部署步骤
+
+先启动局域网侧（btcidx），再启动外网侧（btcexp）。rathole 客户端会自动重连，
+启动顺序并非强制要求，但 btcidx 就绪后 btcexp 立即有可用上游。
+
+### A. 局域网主机（btcidx）
 
 ```bash
 cd btcexp-docker
 
-# 1. 将模板复制到 checkout 外的私有路径并按需修改。
+# 1. 私有环境文件与数据目录（首次执行）。
 sudo install -d -m 700 /etc/btcexp
-sudo install -m 600 .env.example /etc/btcexp/signet.env
-sudoedit /etc/btcexp/signet.env
-# 将 BTCIDX_ENV_FILE 改为 /etc/btcexp/signet.env，并设置唯一的
-# COMPOSE_PROJECT_NAME、数据目录、Web 端口和 bitcoind RPC/ZMQ 配置。
+sudo install -m 600 env/btcidx-mainnet.env.example /etc/btcexp/btcidx-mainnet.env
+sudoedit /etc/btcexp/btcidx-mainnet.env
+#    按需修改 COMPOSE_PROJECT_NAME、BTCIDX_ENV_FILE（必须等于此文件的绝对
+#    路径）、RATHOLE_CONFIG_FILE、数据目录与 RPC/ZMQ 配置。
 
-# 2. 准备该实例的数据目录并授予容器用户权限（首次必须执行）。
-sudo mkdir -p /srv/btcexp/signet/{btcidx,redis}
-sudo chown -R 10000:10000 /srv/btcexp/signet/btcidx
-sudo chown -R 999:999 /srv/btcexp/signet/redis
+sudo mkdir -p /srv/btcexp/mainnet/{btcidx,redis}
+sudo chown -R 10000:10000 /srv/btcexp/mainnet/btcidx
+sudo chown -R 999:999 /srv/btcexp/mainnet/redis
 
-# 3. 显式指定配置文件和项目名，拉取镜像并启动。
-docker compose --env-file /etc/btcexp/signet.env -p btcexp-signet pull
-docker compose --env-file /etc/btcexp/signet.env -p btcexp-signet up -d
+# 2. 启动（只拉取镜像，不构建）。
+docker compose -f docker-compose.btcidx.yml \
+  --env-file /etc/btcexp/btcidx-mainnet.env -p btcidx-mainnet pull
+docker compose -f docker-compose.btcidx.yml \
+  --env-file /etc/btcexp/btcidx-mainnet.env -p btcidx-mainnet up -d
 
-# 4. 查看该实例的状态。
-docker compose --env-file /etc/btcexp/signet.env -p btcexp-signet ps
-docker compose --env-file /etc/btcexp/signet.env -p btcexp-signet logs -f btcidx
+# 3. 检查。
+docker compose -f docker-compose.btcidx.yml \
+  --env-file /etc/btcexp/btcidx-mainnet.env -p btcidx-mainnet ps
+docker compose -f docker-compose.btcidx.yml \
+  --env-file /etc/btcexp/btcidx-mainnet.env -p btcidx-mainnet logs -f btcidx rathole-client
 ```
 
-首次启动 btcidx 会从 genesis 同步整条链，追平（`utxo_ready=true`）后查询才返回数据；同步期间接口返回 `503`。
+首次启动 btcidx 会从 genesis 同步整条链，追平（`utxo_ready=true`）后查询才返回
+数据；同步期间接口返回 `503`。
+
+### B. 外网主机（btcexp）
+
+```bash
+cd btcexp-docker
+
+sudo install -d -m 700 /etc/btcexp
+sudo install -m 600 env/btcexp-mainnet.env.example /etc/btcexp/btcexp-mainnet.env
+sudoedit /etc/btcexp/btcexp-mainnet.env
+#    RATHOLE_CONFIG_FILE 指向服务端 rathole 配置；
+#    RATHOLE_CONTROL_PORT 与客户端 remote_addr 的端口一致；
+#    APP_URL / GA_ID / PRICE_* / API_* 按站点设置。
+
+sudo mkdir -p /srv/btcexp/mainnet/redis
+sudo chown -R 999:999 /srv/btcexp/mainnet/redis
+
+docker compose -f docker-compose.btcexp.yml \
+  --env-file /etc/btcexp/btcexp-mainnet.env -p btcexp-mainnet pull
+docker compose -f docker-compose.btcexp.yml \
+  --env-file /etc/btcexp/btcexp-mainnet.env -p btcexp-mainnet up -d
+```
+
+### 验证整条链路
+
+```bash
+# btcexp 自身的健康与就绪（/ready 在 btcidx 追平前返回 503）。
+curl -fsS http://127.0.0.1:8088/health
+curl -fsS http://127.0.0.1:8088/ready
+
+# 通过隧道直接查询 btcidx 的 REST 状态，验证 rathole 两端都正常。
+docker compose -f docker-compose.btcexp.yml \
+  --env-file /etc/btcexp/btcexp-mainnet.env -p btcexp-mainnet \
+  exec btcexp curl -fsS http://rathole-server:5202/api/v1/status
+```
 
 ### 访问地址
 
-- Web UI：<http://localhost:8088/>（由 `PUB_WEB_PORT` 决定）
+- Web UI：<http://localhost:8088/>（由 `PUB_WEB_PORT` 决定，仅监听
+  `127.0.0.1`；对外请配置 TLS 反向代理）
 - 健康检查：`/health`、`/ready`（含 indexer lag）、`/metrics`（Prometheus）
 - 实时提示：页面自动连接 `ws://localhost:8088/ws?topics=blocks,mempool`
 - JSON API（仅 `API_ENABLED=true`）：`/api/v1/*`、`/swagger-ui/`
 
-btcidx、redis 均不对外发布端口，只能通过 btcexp 或容器内部访问。btcexp 的 HTTP 端口本身仅监听宿主机 `127.0.0.1`；从其他机器访问时，请配置 TLS 反向代理。若在反向代理后启用 JSON API，请同时设置 `API_KEY`。
-
 ---
 
-## 配置说明（`.env`）
+## 配置说明
 
-仅保留部署相关、必须由用户决定的设置；其余参数在 `docker-compose.yml` 中固定。
+Compose 通过 `--env-file` 读取环境文件做变量插值。btcidx 编排还会把该文件整体
+注入 `btcidx` 容器（`BTCIDX_ENV_FILE`），因此其中的 `BTCIDX_*` 即该实例的
+RPC/ZMQ 配置；`BTCIDX_ENV_FILE` 必须等于 `--env-file` 的绝对路径。
 
-Docker Compose 通过 `--env-file` 读取该文件做变量插值；`BTCIDX_ENV_FILE` 必须设置为同一个绝对路径，Compose 才会把该文件注入 `btcidx` 容器。因此其中的 `BTCIDX_*`（RPC/ZMQ）项即为该实例的 btcidx 连接配置。单实例兼容方式仍可复制 `.env.example` 为 `.env` 并保留默认 `BTCIDX_ENV_FILE=.env`。
-
-### 存储路径
-
-| 变量 | 默认 | 说明 |
-|---|---|---|
-| `HOST_BTCIDX_DATA_DIR` | `./data/btcidx` | btcidx RocksDB 数据目录（挂载到容器 `/var/lib/btcidx/data`） |
-| `HOST_REDIS_DATA_DIR` | `./data/redis` | Redis 持久化目录（挂载到容器 `/data`） |
-
-相对路径以本 compose 目录为基准。多实例部署必须使用不重叠的**绝对路径**；两个 btcidx 绝不能共享 RocksDB 目录，两个 Redis 实例也绝不能共享持久化目录。
-
-### 容器镜像
+### 局域网主机（btcidx）
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `IMAGE_TAG` | `latest` | 所有 intgrow 镜像统一使用的标签（可固定为具体版本，如 `v1.2.3`） |
-| `BTCIDX_IMAGE` | `ghcr.io/mattxlee/btcidx` | btcidx 镜像名（一般无需修改） |
-| `BTCEXP_IMAGE` | `ghcr.io/mattxlee/btcexp` | btcexp 镜像名（一般无需修改） |
-
-完整镜像引用为 `${*_IMAGE}:${IMAGE_TAG}`。若 GHCR 包为私有，需先登录：
-
-```bash
-echo "$GHCR_TOKEN" | docker login ghcr.io -u <github-user> --password-stdin
-docker compose --env-file /etc/btcexp/mainnet.env -p btcexp-mainnet pull
-```
-
-### 站点、SEO 与实时
-
-| 变量 | 默认 | 说明 |
-|---|---|---|
-| `APP_URL` | 空 | 部署对外的站点根地址（无尾斜杠）。btcexp 在运行时用它生成 canonical/Open Graph 与 `robots.txt` / `sitemap.xml`：mainnet 用 `https://www.intgrow.com`，testnet4 用 `https://testnet4.intgrow.com`。为空时 canonical 保持相对路径并禁用 sitemap。镜像本身不含域名，两个实例共用同一镜像。 |
-| `GA_ID` | 空 | GA4 measurement ID（如 `G-24M49RN8J6`），btcexp 在页面中注入。为空则完全不加载统计脚本；testnet4 在建立自己的媒体资源前保持为空。 |
-| `MAINNET_URL` / `TESTNET4_URL` | 空 | 顶栏网络切换链接；为空隐藏对应链接。 |
-| `WS_MAX_CONNS_PER_IP` | 由镜像默认 `5` | 可选的每 IP 并发 `/ws` 连接上限；一般无需在编排中设置。 |
-
-### JSON API（可选）
-
-| 变量 | 默认 | 说明 |
-|---|---|---|
-| `API_ENABLED` | `false` | 挂载 `/api/v1/*`、`/api/v1/ws` 与 Swagger。Web UI 不需要；仅在外部客户端需要时开启。 |
-| `API_KEY` | 空 | 设置后 `/api/v1/*`（health/ready 除外）要求 `X-API-Key` 或 `Authorization: Bearer`。 |
-
-### 网络与端口
-
-| 变量 | 默认 | 说明 |
-|---|---|---|
-| `COMPOSE_PROJECT_NAME` | `btcexp` | Compose 项目名；每个实例必须唯一，用于隔离容器与网络 |
-| `BTCIDX_ENV_FILE` | `.env` | 注入 `btcidx` 的环境文件；必须等于启动时 `--env-file` 的同一文件（外部文件使用绝对路径） |
-| `NETWORK` | `signet` | 链网络，`mainnet`/`signet`/`testnet`/`regtest`，同时下发给 btcidx 与 btcexp，必须与 bitcoind 一致；Bitcoin Core testnet4 使用 `testnet` |
-| `PUB_WEB_PORT` | `8088` | 唯一宿主机发布端口：btcexp 的 Web UI / `/ws` / ops（仅绑定 `127.0.0.1`，容器端口固定为 3000）；每个实例必须不同 |
-
-### bitcoind 连接
-
-| 变量 | 默认 | 说明 |
-|---|---|---|
-| `BTCIDX_RPC_URL` | `http://host.docker.internal:8332` | bitcoind JSON-RPC 地址；**注意按链改端口**。testnet4 常见默认值是 `48332`（以节点实际配置为准，不要沿用 testnet3 的 `18332`） |
-| `BTCIDX_RPC_USER` / `BTCIDX_RPC_PASS` | `bitcoin` / `change-me` | RPC 用户名密码 |
-| `BTCIDX_RPC_COOKIE_FILE` | 注释 | 改用 cookie 认证时：注释掉上面的 USER/PASS，再启用此项 |
+| `COMPOSE_PROJECT_NAME` | `btcidx` | Compose 项目名；每个实例唯一 |
+| `BTCIDX_ENV_FILE` | `.env` | 注入 btcidx 的环境文件；必须等于 `--env-file` 路径 |
+| `HOST_BTCIDX_DATA_DIR` | `./data/btcidx` | btcidx RocksDB 数据目录（挂载到 `/var/lib/btcidx/data`） |
+| `HOST_REDIS_DATA_DIR` | `./data/redis` | 本机 Redis 持久化目录（挂载到 `/data`） |
+| `IMAGE_TAG` | `latest` | intgrow 镜像标签（可固定为具体版本） |
+| `BTCIDX_IMAGE` | `ghcr.io/mattxlee/btcidx` | btcidx 镜像（一般无需修改） |
+| `NETWORK` | `signet` | `mainnet`/`signet`/`testnet`/`regtest`；Bitcoin Core testnet4 用 `testnet` |
+| `RATHOLE_CONFIG_FILE` | `./rathole/client.toml` | rathole 客户端配置（含 token 与公钥） |
+| `RATHOLE_IMAGE` / `RATHOLE_VERSION` | `rapiz1/rathole` / `v0.5.0` | 隧道镜像 |
+| `BTCIDX_RPC_URL` | `http://host.docker.internal:8332` | bitcoind JSON-RPC 地址（按链改端口） |
+| `BTCIDX_RPC_USER` / `BTCIDX_RPC_PASS` | `bitcoin` / `change-me` | RPC 凭据 |
+| `BTCIDX_RPC_COOKIE_FILE` | 注释 | 改用 cookie 认证时启用，并注释掉 USER/PASS |
 | `BTCIDX_ZMQ_ENABLED` | `true` | 是否使用 ZMQ 实时通知 |
 | `BTCIDX_ZMQ_ENDPOINT` | `tcp://host.docker.internal:28332` | bitcoind ZMQ 端点 |
 
-> 若使用 cookie 认证：所选实例环境文件中注释掉 `BTCIDX_RPC_USER`/`BTCIDX_RPC_PASS`、启用 `BTCIDX_RPC_COOKIE_FILE` 后，使用该实例对应的 `docker compose --env-file … -p … up -d` 重建容器，使变量不再注入。
+> cookie 认证：注释掉 `BTCIDX_RPC_USER`/`BTCIDX_RPC_PASS`、启用
+> `BTCIDX_RPC_COOKIE_FILE` 后，用同一组参数 `up -d` 重建容器，使变量不再注入。
+
+### 外网主机（btcexp）
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `COMPOSE_PROJECT_NAME` | `btcexp` | Compose 项目名；每个实例唯一 |
+| `HOST_REDIS_DATA_DIR` | `./data/redis` | 本机 Redis 持久化目录 |
+| `IMAGE_TAG` | `latest` | intgrow 镜像标签 |
+| `BTCEXP_IMAGE` | `ghcr.io/mattxlee/btcexp` | btcexp 镜像（一般无需修改） |
+| `NETWORK` | `signet` | 必须与局域网侧 `NETWORK` 一致 |
+| `PUB_WEB_PORT` | `8088` | btcexp 的 Web UI / `/ws` / ops 端口（仅绑定 `127.0.0.1`） |
+| `RATHOLE_CONFIG_FILE` | `./rathole/server.toml` | rathole 服务端配置（含私钥与 token） |
+| `RATHOLE_CONTROL_PORT` | `2333` | 发布到宿主机的隧道控制端口；每个实例唯一，且客户端 `remote_addr` 必须指向它 |
+| `APP_URL` | 空 | 对外站点根地址（无尾斜杠），用于 canonical/OG、`robots.txt`、`sitemap.xml`；为空则保持相对路径并禁用 sitemap |
+| `GA_ID` | 空 | GA4 measurement ID；为空不加载统计脚本 |
+| `PRICE_API_URL` / `PRICE_INST_ID` | `https://price.intgrow.com` / `BTC-USDT` | BTC 报价端点；`PRICE_API_URL` 为空则首页价格卡片显示“—” |
+| `MAINNET_URL` / `TESTNET4_URL` | 空 | 顶栏网络切换链接；为空隐藏对应链接 |
+| `API_ENABLED` / `API_KEY` | `false` / 空 | 挂载 `/api/v1/*` 与 Swagger；对外暴露时应同时设置 `API_KEY` |
+| `WS_MAX_CONNS_PER_IP` | 由镜像默认 `5` | 每 IP 并发 `/ws` 连接上限 |
+| `ELECTRUM_CONNECT_TIMEOUT_SECS` / `ELECTRUM_READ_TIMEOUT_SECS` | `10` / `20` | 可选；隧道 RTT 较高时可调大 Electrum 连接/读取超时 |
 
 ### 固定的内部配置
 
-以下内容无需用户干预，已写死在 `docker-compose.yml`：
+写死在编排文件中，通常无需修改：
 
-- btcidx：容器内存储路径 `/var/lib/btcidx/data`、HTTP `:8080`、Electrum TCP `:50001`、Redis 缓存地址、日志级别。
-- btcexp：监听 `0.0.0.0:3000`、索引后端 `btcidx`、上游 `btcidx:8080` / `btcidx:50001`、Redis 地址、限流/日志等使用内置默认值；JSON API 经 `API_ENABLED` 控制。
-- 除 `PUB_WEB_PORT` 外不发布任何端口；该端口仅绑定宿主机 `127.0.0.1`。若需从宿主机外访问，请由 TLS 反向代理转发；btcidx 的 Prometheus 指标默认关闭。
+- btcidx：容器内存储 `/var/lib/btcidx/data`、HTTP `:8080`、Electrum `:50001`、
+  Redis `redis://redis:6379`、日志级别、`nofile` 65536。
+- btcexp：监听 `0.0.0.0:3000`、`INDEXER_BACKEND=btcidx`、上游
+  `http://rathole-server:5202` 与 `rathole-server:5203`、Redis
+  `redis://redis:6379`。
+- rathole 服务端：控制端口容器内固定 `2333`，服务端口固定 `5202`/`5203`；
+  只有控制端口发布到宿主机。
+- 局域网编排不发布任何端口；外网编排只发布 `PUB_WEB_PORT`（绑定 `127.0.0.1`）
+  与 `RATHOLE_CONTROL_PORT`。
 
-如需调整这些值，请直接修改 `docker-compose.yml`。
+如需调整这些值，请直接修改对应的 `docker-compose.*.yml` 与 rathole 配置。
 
 ---
 
 ## 同时部署 mainnet 与 testnet4
 
-使用同一份 checkout 时，为每个链创建一个 checkout 外的私有环境文件。仓库中的
-[`env/mainnet.env.example`](env/mainnet.env.example) 与
-[`env/testnet4.env.example`](env/testnet4.env.example) 是无凭据模板。
+四个模板分别对应两台主机上的两个实例：
 
-```bash
-cd btcexp-docker
-sudo install -d -m 700 /etc/btcexp
-sudo install -m 600 env/mainnet.env.example /etc/btcexp/mainnet.env
-sudo install -m 600 env/testnet4.env.example /etc/btcexp/testnet4.env
-sudoedit /etc/btcexp/mainnet.env
-sudoedit /etc/btcexp/testnet4.env
+| 主机 | 实例 | 模板 | 项目名 | 端口 |
+|---|---|---|---|---|
+| 外网 | mainnet | `env/btcexp-mainnet.env.example` | `btcexp-mainnet` | Web `8088`，控制 `2333` |
+| 外网 | testnet4 | `env/btcexp-testnet4.env.example` | `btcexp-testnet4` | Web `8089`，控制 `2334` |
+| 局域网 | mainnet | `env/btcidx-mainnet.env.example` | `btcidx-mainnet` | 无发布端口 |
+| 局域网 | testnet4 | `env/btcidx-testnet4.env.example` | `btcidx-testnet4` | 无发布端口 |
 
-# 目录不能共享；按模板创建后设置镜像运行用户的权限。
-sudo mkdir -p /srv/btcexp/mainnet/{btcidx,redis} \
-              /srv/btcexp/testnet4/{btcidx,redis}
-sudo chown -R 10000:10000 /srv/btcexp/mainnet/btcidx /srv/btcexp/testnet4/btcidx
-sudo chown -R 999:999 /srv/btcexp/mainnet/redis /srv/btcexp/testnet4/redis
+要点：
 
-# 每条链使用不同项目名，因此拥有独立容器和 btcexp-net 网络。
-docker compose --env-file /etc/btcexp/mainnet.env -p btcexp-mainnet up -d
-docker compose --env-file /etc/btcexp/testnet4.env -p btcexp-testnet4 up -d
-```
-
-主网模板使用 `NETWORK=mainnet`、`127.0.0.1:8088` 和
-`/srv/btcexp/mainnet/*`；testnet4 模板使用 `NETWORK=testnet`、
-`127.0.0.1:8089` 和 `/srv/btcexp/testnet4/*`。`testnet4` 是 Bitcoin Core
-链实例的名称，而 btcexp/btcidx 的应用配置值是通用的 `testnet`。
-
-两个环境文件都必须设置其自身的 `COMPOSE_PROJECT_NAME` 与
-`BTCIDX_ENV_FILE`，后者需与 `--env-file` 指定的绝对路径相同。每个实例还
-必须指向自己的 bitcoind RPC/ZMQ 端点；不要共享 RPC/ZMQ 端口、认证信息或数据
-目录。ZMQ 仍须只绑定 Docker 网桥或其他私有接口。
-
-反向代理应使用不同上游，例如 `mainnet.example.com` → `127.0.0.1:8088`，
-`testnet4.example.com` → `127.0.0.1:8089`。两个端口都仍然只绑定到宿主机回环地址。
+- 每个实例使用**独立的**数据目录、Redis 目录、项目名与 rathole 配置
+  （各自的 token 与密钥对）。两个 btcidx 绝不能共享 RocksDB 目录，两个 Redis
+  也绝不能共享持久化目录。
+- testnet4 的 `NETWORK=testnet`（Bitcoin Core 的链实例叫 testnet4，应用配置值
+  是通用的 `testnet`）。
+- 两个实例的 bitcoind RPC/ZMQ 端口、隧道控制端口都必须不同。
+- 反向代理使用不同上游：`mainnet.example.com` → `127.0.0.1:8088`，
+  `testnet4.example.com` → `127.0.0.1:8089`。
 
 ---
 
 ## 常用命令
 
-以下以 `/etc/btcexp/mainnet.env` 与 `btcexp-mainnet` 为例。对 testnet4 请将两者
-替换为 `/etc/btcexp/testnet4.env` 与 `btcexp-testnet4`；不要省略这两个实例标识。
+以下以 mainnet 为例。局域网侧把 `-f` / `-p` / `--env-file` 换成 btcidx 对应值。
 
 ```bash
-COMPOSE=(docker compose --env-file /etc/btcexp/mainnet.env -p btcexp-mainnet)
-"${COMPOSE[@]}" pull                         # 拉取/更新 ghcr 镜像
-"${COMPOSE[@]}" up -d                         # 启动全部服务
-"${COMPOSE[@]}" up -d --force-recreate btcexp # 用新镜像重建某个服务
-"${COMPOSE[@]}" logs -f btcidx                # 跟踪日志
-"${COMPOSE[@]}" ps                            # 查看状态
-"${COMPOSE[@]}" restart btcexp                # 重启
-"${COMPOSE[@]}" down                          # 停止并删除容器（保留数据目录）
+# 外网主机
+COMPOSE=(docker compose -f docker-compose.btcexp.yml \
+         --env-file /etc/btcexp/btcexp-mainnet.env -p btcexp-mainnet)
+"${COMPOSE[@]}" pull                          # 拉取/更新镜像
+"${COMPOSE[@]}" up -d                          # 启动全部服务
+"${COMPOSE[@]}" up -d --force-recreate btcexp  # 用新镜像重建某个服务
+"${COMPOSE[@]}" logs -f btcexp rathole-server  # 跟踪日志
+"${COMPOSE[@]}" ps                             # 查看状态
+"${COMPOSE[@]}" down                           # 停止并删除容器（保留数据目录）
 
-# 健康检查（通过容器内网络访问，无需对外端口）
-"${COMPOSE[@]}" exec btcexp curl -fsS http://127.0.0.1:3000/ready  # 同步完成前 503
-"${COMPOSE[@]}" exec btcexp curl -fsS http://btcidx:8080/api/v1/status    # btcidx
-curl -fsS http://127.0.0.1:8088/                                            # Web UI
-curl -fsS http://127.0.0.1:8088/health                                      # ops
+# 局域网主机
+COMPOSE=(docker compose -f docker-compose.btcidx.yml \
+         --env-file /etc/btcexp/btcidx-mainnet.env -p btcidx-mainnet)
+"${COMPOSE[@]}" logs -f btcidx rathole-client
+"${COMPOSE[@]}" ps
 
-# 清空 mainnet btcidx 索引重新同步（危险；替换为本实例的实际目录）
+# 通过隧道检查 btcidx 状态（在外网主机执行）
+docker compose -f docker-compose.btcexp.yml \
+  --env-file /etc/btcexp/btcexp-mainnet.env -p btcexp-mainnet \
+  exec btcexp curl -fsS http://rathole-server:5202/api/v1/status
+
+# 清空 mainnet btcidx 索引重新同步（危险；在局域网主机执行）
 "${COMPOSE[@]}" stop btcidx
 sudo rm -rf /srv/btcexp/mainnet/btcidx/* && sudo chown -R 10000:10000 /srv/btcexp/mainnet/btcidx
 "${COMPOSE[@]}" up -d btcidx
@@ -266,43 +368,88 @@ sudo rm -rf /srv/btcexp/mainnet/btcidx/* && sudo chown -R 10000:10000 /srv/btcex
 
 ---
 
-## 服务间连接与网络
-
-- 三个容器都接入 `btcexp-net` 网络，用**服务名**互相寻址：
-  - `btcexp` 通过 `http://btcidx:8080` 与 `btcidx:50001` 访问索引器。
-  - btcexp 与 btcidx 通过 `redis://redis:6379` 使用共享缓存。
-- 浏览器只与 btcexp 通信：页面、静态资源、`/ws`、`/health`、`/ready`、`/metrics`
-  都在同一进程内，不需要 nginx 同源反代，也不存在 CORS 问题。
-- bitcoind 在宿主机上，容器通过 `extra_hosts: host.docker.internal:host-gateway` 访问。
-
----
-
 ## 故障排查
 
-**btcexp 无法连接 btcidx / 返回 502**
-本编排使用服务名 `http://btcidx:8080`，容器内不要写 `127.0.0.1`（那是容器自身）。
+**btcexp 无法连接 btcidx / 返回 502 或上游不可用**
+先看两侧隧道日志。外网主机 `logs rathole-server`，局域网主机 `logs
+rathole-client`。常见原因：
+
+- 客户端 `remote_addr` 指向的域名/端口错误，或外网防火墙未放行
+  `RATHOLE_CONTROL_PORT`；
+- 两端 `default_token` 不一致（日志会提示认证失败）；
+- Noise 密钥不匹配：服务端 `local_private_key` 与客户端 `remote_public_key`
+  必须来自同一次 `rathole --genkey`；
+- 两端服务名不一致（见 rathole `.toml` 中的 `[*.services.btcidx-http]` 与
+  `[*.services.btcidx-electrum]`）。
+
+**隧道正常但页面返回 503**
+btcidx 尚在同步或正处于 reorg。用上面的 `exec btcexp curl … /api/v1/status`
+查看 `utxo_ready` 与 `tip_height`。
 
 **最近区块/内存池页面没有自动提示**
 确认浏览器能连上 `ws://<host>:<port>/ws`；反向代理需转发 `Upgrade`/`Connection`
 头。断线与 `lagged` 会显示提示并计数（`ws_lagged_total`）。
 
 **`/api/v1/*` 返回 404**
-这是默认行为。需要 API 时在环境文件中设置 `API_ENABLED=true` 并重建 btcexp
-容器；对外暴露时同时设置 `API_KEY`。
+这是默认行为。需要 API 时在外网主机的环境文件中设置 `API_ENABLED=true` 并重建
+btcexp 容器；对外暴露时同时设置 `API_KEY`。
 
 **btcidx 启动即退出，日志提示存储不可写**
-宿主机数据目录权限不足：`sudo chown -R 10000:10000 data/btcidx`（redis 同理 `999:999`）。
-
-**查询返回 503**
-btcidx 尚在同步或正处于 reorg。用 `docker compose exec btcexp curl -fsS http://btcidx:8080/api/v1/status` 查看 `utxo_ready` 与 `tip_height`。
+宿主机数据目录权限不足：`sudo chown -R 10000:10000 /srv/btcexp/mainnet/btcidx`
+（Redis 目录为 `999:999`）。
 
 **RPC 认证失败 / 连接被拒**
-确认 `BTCIDX_RPC_URL` 的端口与 `NETWORK` 匹配（signet 为 38332），且 bitcoind 的 `rpcbind`/`rpcallowip` 允许 Docker 网段访问。
+确认 `BTCIDX_RPC_URL` 的端口与 `NETWORK` 匹配，且 bitcoind 的
+`rpcbind`/`rpcallowip` 允许 Docker 网段访问。btcidx 只运行在局域网主机上，
+RPC 端点使用 `host.docker.internal` 即可。
+
+**Redis 启动日志提示 `Memory overcommit must be enabled`**
+宿主机内核参数 `vm.overcommit_memory=0` 导致的告警，Redis 容器无法修改它。在两台
+主机上分别执行并持久化：
+
+```bash
+echo 'vm.overcommit_memory = 1' | sudo tee /etc/sysctl.d/99-redis-overcommit.conf
+sudo sysctl --system
+```
+
+Redis 只作为各自栈内的缓存；出现该告警时最坏情况是后台 RDB 保存失败、缓存丢失
+（可自动重建），不影响 btcidx 的索引数据。
+
+**高延迟**
+隧道本身引入公网 RTT。页面与 `/ws` 通常不受影响；若 Electrum 查询超时，可在
+btcexp 编排中适当提高 `ELECTRUM_CONNECT_TIMEOUT_SECS` /
+`ELECTRUM_READ_TIMEOUT_SECS`（镜像默认 10s/20s）。这些不是必填项。
+
+---
+
+## 从旧单机编排迁移
+
+旧版本只有一个 `docker-compose.yml`，三个服务在同一主机、同一网络。拆分后：
+
+1. 在旧主机上停止旧项目（项目名以旧环境文件中的 `COMPOSE_PROJECT_NAME` 为准）：
+   ```bash
+   docker compose -p btcexp-mainnet down
+   ```
+   数据目录（如 `/srv/btcexp/mainnet/btcidx`）保留。
+2. 把旧环境文件的内容拆成两份：
+   - `BTCIDX_*`、`HOST_BTCIDX_DATA_DIR`、`NETWORK` → 局域网主机的
+     `btcidx-<instance>.env`；
+   - `PUB_WEB_PORT`、`APP_URL`、`GA_ID`、`PRICE_*`、`MAINNET_URL`、
+     `TESTNET4_URL`、`API_*`、`HOST_REDIS_DATA_DIR` → 外网主机的
+     `btcexp-<instance>.env`。
+3. 在局域网主机沿用原 btcidx 数据目录（`chown 10000:10000` 保持不变）；旧的
+   Redis 目录只属于旧共享缓存，可保留或清空。外网主机需要新建一个空的 Redis
+   目录（`chown 999:999`）。
+4. 生成 rathole 密钥/token 并按上文配置两端，然后先启动 btcidx 编排，再启动
+   btcexp 编排。
 
 ---
 
 ## 备注
 
-- 各组件镜像均从 GHCR 拉取，本目录不含源码，可独立部署。
-- `btcexpfr` 已废弃：旧部署中的该服务、`nginx.conf` 和 `BTCEXPFR_IMAGE` 变量可删除。
-- `data/` 与 `.env` 含运行数据和凭据，请勿提交到版本库。
+- 各组件镜像均从 GHCR 拉取；rathole 从 Docker Hub 拉取。本目录不含源码，可独立
+  部署。
+- `btcexpfr` 已废弃：旧部署中的该服务、`nginx.conf` 和 `BTCEXPFR_IMAGE` 变量
+  可删除。
+- 真实的 `rathole/*.toml` 含隧道 token 与私钥，`.env` 含凭据，`data/` 含运行
+  数据，均不应提交到版本库。

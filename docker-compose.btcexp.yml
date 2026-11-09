@@ -1,0 +1,119 @@
+# PUBLIC-HOST side of the split Intgrow deployment.
+#
+#   browser ──► btcexp (SSR UI + realtime /ws) ──► redis (btcexp's own cache)
+#                    │
+#                    └──► rathole-server ──(tunnel)──► btcidx on the LAN host
+#
+# This stack runs on the internet-facing host. btcexp reaches btcidx only
+# through rathole: the tunnel terminates in the rathole-server container and
+# its service ports stay on this Docker network (they are never published to
+# the host). The only inbound port is the rathole control port, which the LAN
+# host's rathole-client dials; restrict it in the firewall to the LAN host's
+# public address where possible.
+#
+# The LAN side lives in docker-compose.btcidx.yml; see README.md.
+#
+#   docker compose -f docker-compose.btcexp.yml \
+#     --env-file /etc/btcexp/btcexp-mainnet.env -p btcexp-mainnet pull
+#   docker compose -f docker-compose.btcexp.yml \
+#     --env-file /etc/btcexp/btcexp-mainnet.env -p btcexp-mainnet up -d
+
+# Set COMPOSE_PROJECT_NAME per deployment (for example btcexp-mainnet).
+# Compose scopes container and network names by this value.
+name: ${COMPOSE_PROJECT_NAME:-btcexp}
+
+services:
+  # ---------------------------------------------------------------------------
+  # btcexp — server-rendered web UI + first-party realtime socket. This is the
+  # only service browsers reach; the JSON API and Swagger stay off unless
+  # API_ENABLED=true.
+  # ---------------------------------------------------------------------------
+  btcexp:
+    image: ${BTCEXP_IMAGE:-ghcr.io/mattxlee/btcexp}:${IMAGE_TAG:-latest}
+    pull_policy: always
+    restart: unless-stopped
+    environment:
+      NETWORK: ${NETWORK:-signet}
+      INDEXER_BACKEND: btcidx
+      # The rathole server forwards btcidx's REST :8080 and Electrum :50001
+      # to these in-network ports (see rathole/server.toml.example).
+      BTCIDX_REST_URL: http://rathole-server:5202
+      BTCIDX_ELECTRUM_ADDR_PORT: rathole-server:5203
+      # Electrum now crosses a WAN tunnel; these are the image defaults and can
+      # be raised if queries time out on a high-latency link.
+      ELECTRUM_CONNECT_TIMEOUT_SECS: ${ELECTRUM_CONNECT_TIMEOUT_SECS:-10}
+      ELECTRUM_READ_TIMEOUT_SECS: ${ELECTRUM_READ_TIMEOUT_SECS:-20}
+      REDIS_URL: redis://redis:6379
+      RUST_LOG: info
+      # JSON/WS API and Swagger are off by default; the SSR UI talks to the
+      # service layer directly. Enable only if a client needs the API.
+      API_ENABLED: ${API_ENABLED:-false}
+      API_KEY: ${API_KEY:-}
+      # Public origin used for canonical/Open Graph URLs and /sitemap.xml.
+      # Empty keeps relative canonicals and disables the sitemap.
+      APP_URL: ${APP_URL:-}
+      # GA4 measurement ID; empty disables analytics.
+      GA_ID: ${GA_ID:-}
+      # External BTC price quote endpoint; empty disables the price card.
+      PRICE_API_URL: ${PRICE_API_URL:-https://price.intgrow.com}
+      PRICE_INST_ID: ${PRICE_INST_ID:-BTC-USDT}
+      # Network-switch links in the header; empty hides the link.
+      MAINNET_URL: ${MAINNET_URL:-}
+      TESTNET4_URL: ${TESTNET4_URL:-}
+      # Concurrent first-party /ws connections per client IP.
+      WS_MAX_CONNS_PER_IP: ${WS_MAX_CONNS_PER_IP:-5}
+    # Keep the HTTP port (UI + ops + /ws) on the host loopback by default;
+    # publish it through a TLS reverse proxy for access from elsewhere.
+    ports:
+      - "127.0.0.1:${PUB_WEB_PORT:-8088}:3000"
+    depends_on:
+      - rathole-server
+      - redis
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - intgrow-net
+
+  # ---------------------------------------------------------------------------
+  # rathole-server — receives the tunnel from the LAN host and exposes btcidx
+  # on the Docker network. Only the control port is published to the host so
+  # the LAN client can connect; 5202/5203 stay internal to this network.
+  # ---------------------------------------------------------------------------
+  rathole-server:
+    image: ${RATHOLE_IMAGE:-rapiz1/rathole}:${RATHOLE_VERSION:-v0.5.0}
+    restart: unless-stopped
+    command: ["/etc/rathole/rathole.toml"]
+    volumes:
+      # Contains the private key and service tokens; keep it private.
+      - ${RATHOLE_CONFIG_FILE:-./rathole/server.toml}:/etc/rathole/rathole.toml:ro
+    ports:
+      # Host port must be unique per instance on this host; the container
+      # side stays 2333 and must match rathole/server.toml's bind_addr.
+      - "${RATHOLE_CONTROL_PORT:-2333}:2333"
+    networks:
+      - intgrow-net
+
+  # ---------------------------------------------------------------------------
+  # Redis — btcexp's cache (internal only). btcidx has its own on the LAN host.
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    volumes:
+      - ${HOST_REDIS_DATA_DIR:-./data/redis}:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks:
+      - intgrow-net
+
+networks:
+  intgrow-net:
+    driver: bridge
